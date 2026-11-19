@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS ml_predictions (
 
 CREATE INDEX idx_ml_predictions_model ON ml_predictions(model_id, prediction_time DESC);
 CREATE INDEX idx_ml_predictions_type ON ml_predictions(prediction_type);
-CREATE INDEX idx_ml_predictions_valid ON ml_predictions(valid_until) WHERE valid_until > NOW();
+CREATE INDEX idx_ml_predictions_valid ON ml_predictions(valid_until) WHERE valid_until IS NOT NULL;
 
 -- Intelligent filters table
 CREATE TABLE IF NOT EXISTS intelligent_filters (
@@ -158,7 +158,7 @@ CREATE INDEX idx_intelligent_filters_confidence ON intelligent_filters(confidenc
 -- Add tenant_id to events table if not exists
 DO $$
 BEGIN
-    IF NOT EXISTS (
+    IF to_regclass('events') IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM information_schema.columns 
         WHERE table_name = 'events' AND column_name = 'tenant_id'
     ) THEN
@@ -170,7 +170,7 @@ END $$;
 -- Add tenant_id to subscriptions table if not exists
 DO $$
 BEGIN
-    IF NOT EXISTS (
+    IF to_regclass('subscriptions') IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM information_schema.columns 
         WHERE table_name = 'subscriptions' AND column_name = 'tenant_id'
     ) THEN

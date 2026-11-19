@@ -1,0 +1,11 @@
+-- Issue #691: table partitioning by time was attempted here.
+--
+-- This migration never applied successfully: PostgreSQL requires every unique
+-- index on a partitioned table to include the partition key, but the indexes
+-- below used (tx_hash, contract_id, event_type) without `timestamp`. As a
+-- result the `events` table has never been partitioned in any deployment.
+--
+-- It is intentionally a no-op so that the historical chain can be replayed and
+-- squashed into a baseline. Re-introducing partitioning is tracked separately;
+-- it needs a new deduplication key that includes the partition column.
+SELECT 1;

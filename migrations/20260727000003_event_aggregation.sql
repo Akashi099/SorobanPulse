@@ -1,5 +1,9 @@
 -- Issue #680: Implement event aggregation pipelines
 
+-- The earlier aggregation_rules table (20260530000004) has a different,
+-- incompatible shape. Recreate it with the shape this feature uses.
+DROP TABLE IF EXISTS aggregation_rules CASCADE;
+
 -- Create aggregation_rules table
 CREATE TABLE IF NOT EXISTS aggregation_rules (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),

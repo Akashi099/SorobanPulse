@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS pagerduty_integrations (
     UNIQUE (subscription_id)
 );
 
+-- The earlier pagerduty_incidents table (20260530000002) has an incompatible
+-- shape; recreate it with the columns this feature uses.
+DROP TABLE IF EXISTS pagerduty_incidents CASCADE;
+
 -- Tracks every triggered / acknowledged / resolved incident
 CREATE TABLE IF NOT EXISTS pagerduty_incidents (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

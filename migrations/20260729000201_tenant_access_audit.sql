@@ -13,7 +13,7 @@
 --     "which tenant IDs has this key touched?" (anomaly detection).
 
 CREATE TABLE IF NOT EXISTS tenant_access_audit (
-    id             BIGSERIAL        PRIMARY KEY,
+    id             BIGSERIAL,
 
     -- Resolved tenant for this request (NULL = admin / unscoped).
     tenant_id      TEXT,
@@ -41,7 +41,10 @@ CREATE TABLE IF NOT EXISTS tenant_access_audit (
     trace_id       TEXT,
 
     -- Wall-clock timestamp of the access.
-    accessed_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+    accessed_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+
+    -- A partitioned table's primary key must include the partition key.
+    PRIMARY KEY (id, accessed_at)
 ) PARTITION BY RANGE (accessed_at);
 
 -- Create the first two monthly partitions (current month + next month).
