@@ -33,8 +33,7 @@ BEGIN
             ) AS partition_date
         FROM pg_tables
         WHERE schemaname = 'public'
-          AND tablename LIKE 'events_%'
-          AND tablename != 'events' -- exclude the parent table
+          AND tablename ~ '^events_[0-9]{4}_[0-9]{2}$'
         ORDER BY tablename DESC
     LOOP
         partition_count_checked := partition_count_checked + 1;
@@ -86,19 +85,12 @@ CREATE TABLE IF NOT EXISTS partition_drops_log (
     partition_name TEXT NOT NULL,
     retained_months INT NOT NULL,
     cutoff_date TIMESTAMP NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_partition_drops_dropped_at (dropped_at DESC)
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Verify that events table has monthly partitions (should already exist from migration 20260727000102)
--- If not present, this migration will fail
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_tables
-        WHERE schemaname = 'public' AND tablename LIKE 'events_%'
-    ) THEN
-        RAISE EXCEPTION 'No monthly event partitions found. Run migration 20260727000102_partition_events_by_month.sql first.';
-    END IF;
-END
-$$;
+CREATE INDEX IF NOT EXISTS idx_partition_drops_dropped_at
+    ON partition_drops_log (dropped_at DESC);
+
+-- The `events` table is not partitioned (the partitioning migration was
+-- invalid), so drop_old_partitions() has no partitions to operate on.
+-- It remains safe to call and simply returns no rows.

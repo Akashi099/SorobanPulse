@@ -39,4 +39,3 @@ COMMENT ON INDEX idx_events_type_ledger              IS 'Global event_type filte
 COMMENT ON INDEX idx_events_contract_type_partial    IS 'Hot-path partial index for contract events (event_type = contract) ordered by ledger';
 COMMENT ON INDEX idx_events_created_at_id            IS 'SSE cursor pagination: ORDER BY created_at DESC, id DESC';
 COMMENT ON INDEX idx_events_event_data_gin           IS 'JSONB containment queries on full event_data document (@> operator)';
-COMMENT ON INDEX idx_events_timestamp                IS 'Timestamp range scans; also used as partition key reference';

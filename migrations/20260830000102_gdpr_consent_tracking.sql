@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS gdpr_data_subject_requests (
   subject_email TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'in_progress', 'completed', 'rejected'
   requested_at TIMESTAMPTZ DEFAULT NOW(),
-  deadline_at TIMESTAMPTZ GENERATED ALWAYS AS (requested_at + INTERVAL '30 days') STORED,
+  deadline_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '30 days'),
   completed_at TIMESTAMPTZ,
   handled_by TEXT,
   rejection_reason TEXT,
@@ -69,7 +69,7 @@ AS $$
     'generated_at', NOW(),
     'subscriptions', (
       SELECT COALESCE(jsonb_agg(row_to_json(s)), '[]'::jsonb)
-      FROM subscriptions s WHERE s.email = p_email
+      FROM subscriptions s WHERE s.email_address = p_email
     ),
     'consent_records', (
       SELECT COALESCE(jsonb_agg(row_to_json(c)), '[]'::jsonb)

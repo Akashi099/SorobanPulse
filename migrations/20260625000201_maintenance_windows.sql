@@ -9,5 +9,4 @@ CREATE TABLE IF NOT EXISTS maintenance_windows (
 );
 
 CREATE INDEX IF NOT EXISTS idx_maintenance_windows_active
-    ON maintenance_windows (start_time, end_time)
-    WHERE end_time > NOW();
+    ON maintenance_windows (start_time, end_time);

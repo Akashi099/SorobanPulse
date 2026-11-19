@@ -118,6 +118,14 @@ DECLARE
     start_dt   DATE;
     end_dt     DATE;
 BEGIN
+    -- `events` is not partitioned (the partitioning migration was invalid), so
+    -- there is nothing to do.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class WHERE relname = 'events' AND relkind = 'p'
+    ) THEN
+        RETURN;
+    END IF;
+
     cur_date  := DATE_TRUNC('month', NOW())::DATE;
     target_dt := cur_date + (months_ahead || ' months')::INTERVAL;
 

@@ -24,16 +24,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS mv_contract_event_counts_uniq
 CREATE INDEX IF NOT EXISTS mv_contract_event_counts_contract_idx
     ON mv_contract_event_counts (contract_id);
 
--- Materialized view: daily event summaries (if not already present).
-CREATE MATERIALIZED VIEW IF NOT EXISTS events_daily_summary AS
-SELECT
-    DATE_TRUNC('day', timestamp) AS event_day,
-    COUNT(*)                     AS event_count,
-    COUNT(DISTINCT contract_id)  AS unique_contracts,
-    COUNT(DISTINCT tx_hash)      AS unique_txs
-FROM events
-GROUP BY DATE_TRUNC('day', timestamp)
-WITH DATA;
-
-CREATE UNIQUE INDEX IF NOT EXISTS events_daily_summary_uniq
-    ON events_daily_summary (event_day);
+-- NOTE: events_daily_summary already exists (created by
+-- 20260428000002_matview_daily_summary.sql with event_date/event_type columns).
+-- The duplicate definition below was removed because `IF NOT EXISTS` made it a
+-- silent no-op while the index on `event_day` failed.

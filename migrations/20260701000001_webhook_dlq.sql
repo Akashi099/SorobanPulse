@@ -23,4 +23,3 @@ CREATE INDEX IF NOT EXISTS idx_webhook_dlq_failed_at
 -- Quickly find entries that have not yet been replayed.
 CREATE INDEX IF NOT EXISTS idx_webhook_dlq_replayed_at
     ON webhook_dlq (replayed_at);
-</br>
