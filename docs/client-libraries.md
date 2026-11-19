@@ -46,7 +46,7 @@ This expands to:
 ```bash
 # 1. Regenerate openapi.json from the #[utoipa::path] annotations on the
 #    handlers (see docs/api-guide.md for how the spec is produced)
-cargo run --bin gen_openapi > openapi.json
+cargo run --features dev-tools --bin gen_openapi > openapi.json
 
 # 2. TypeScript client (typescript-fetch generator)
 npx @openapitools/openapi-generator-cli generate \
@@ -72,7 +72,7 @@ hand and should be kept in sync with the REST surface manually.
 
 > **Known gap**: at the time of writing, the checked-in `openapi.json` only
 > documents 13 of the ~200+ routes registered in `src/routes.rs`'s `ApiDoc`
-> (run `cargo run --bin gen_openapi | python3 -c "import json,sys; print(len(json.load(sys.stdin)['paths']))"`
+> (run `cargo run --features dev-tools --bin gen_openapi | python3 -c "import json,sys; print(len(json.load(sys.stdin)['paths']))"`
 > to check the current count). Regenerating the SDKs today would produce
 > clients with far broader endpoint coverage than what's committed. See
 > `docs/api-guide.md` for more on this discrepancy.

@@ -30,7 +30,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Generate OpenAPI spec
-        run: cargo run --bin gen_openapi > openapi.json
+        run: cargo run --features dev-tools --bin gen_openapi > openapi.json
         working-directory: .
 
       - uses: actions/setup-node@v4
@@ -64,7 +64,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Generate OpenAPI spec
-        run: cargo run --bin gen_openapi > openapi.json
+        run: cargo run --features dev-tools --bin gen_openapi > openapi.json
         working-directory: .
 
       - uses: actions/setup-node@v4
@@ -93,7 +93,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Generate OpenAPI spec
-        run: cargo run --bin gen_openapi > openapi.json
+        run: cargo run --features dev-tools --bin gen_openapi > openapi.json
         working-directory: .
 
       - uses: actions/setup-node@v4

@@ -114,7 +114,7 @@ itself) is in [`docs/api-changelog.md`](api-changelog.md).
 `GET /openapi.json` is generated **at request time** from
 `ApiDoc::openapi()` (`src/routes.rs`), which is built from `#[utoipa::path]`
 annotations on the handler functions listed in the `ApiDoc` derive's
-`paths(...)` — currently around 200 handlers. `cargo run --bin gen_openapi`
+`paths(...)` — currently around 200 handlers. `cargo run --features dev-tools --bin gen_openapi`
 (wrapped by `make gen-openapi`) dumps that same live spec to a file and
 copies it to `docs/openapi.json`:
 

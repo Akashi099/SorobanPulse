@@ -122,6 +122,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Issue #1441: the seed binary is a dev tool, so it lives in the tools
+      # image instead of the production image.
+      target: tools
     depends_on:
       seed:
         condition: service_completed_successfully

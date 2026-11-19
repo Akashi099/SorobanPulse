@@ -2,10 +2,12 @@
 
 `gen_subscription_scaffold` generates a complete set of Rust source files, a SQL migration, and optionally content filter and test scaffolding for a new subscription type.
 
+It is a development-only binary gated behind the `dev-tools` feature, so it is excluded from production builds.
+
 ## Usage
 
 ```bash
-cargo run --bin gen_subscription_scaffold -- <NAME> [OPTIONS]
+cargo run --features dev-tools --bin gen_subscription_scaffold -- <NAME> [OPTIONS]
 ```
 
 | Option | Default | Description |
@@ -20,21 +22,21 @@ cargo run --bin gen_subscription_scaffold -- <NAME> [OPTIONS]
 
 ```bash
 # Minimal: webhook subscription named "token-transfer"
-cargo run --bin gen_subscription_scaffold -- token-transfer
+cargo run --features dev-tools --bin gen_subscription_scaffold -- token-transfer
 
 # Email subscription with tests
-cargo run --bin gen_subscription_scaffold -- payment \
+cargo run --features dev-tools --bin gen_subscription_scaffold -- payment \
   --channel-type email \
   --with-tests
 
 # Full scaffold with filter and tests, preview to stdout
-cargo run --bin gen_subscription_scaffold -- nft-sale \
+cargo run --features dev-tools --bin gen_subscription_scaffold -- nft-sale \
   --with-filter \
   --with-tests \
   --dry-run
 
 # Write to a specific directory
-cargo run --bin gen_subscription_scaffold -- dex-swap \
+cargo run --features dev-tools --bin gen_subscription_scaffold -- dex-swap \
   --with-filter \
   --with-tests \
   --output-dir /tmp/scaffold-preview

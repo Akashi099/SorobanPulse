@@ -145,15 +145,59 @@ tempfile = "3"
 wiremock = "0.6"
 insta = "1"
 
+# Issue #1441: development-only binaries. They are not built unless the
+# `dev-tools` feature is enabled, keeping production images free of them.
 [[bin]]
 name = "gen_env_docs"
 path = "src/bin/gen_env_docs.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "gen_config_docs"
+path = "src/bin/gen_config_docs.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "gen_openapi"
+path = "src/bin/gen_openapi.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "dump_openapi"
+path = "src/bin/dump_openapi.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "gen_postman"
 path = "src/bin/gen_postman.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "gen_subscription_scaffold"
+path = "src/bin/gen_subscription_scaffold.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "pg_tuning_advisor"
+path = "src/bin/pg_tuning_advisor.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "schema_cli"
+path = "src/bin/schema_cli.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"
+required-features = ["dev-tools"]
+
 [features]
 default = ["classical-crypto", "dashboard"]
+
+# Issue #1441: gates development-only binaries (seed, code generators, tooling)
+# so `cargo build --release` produces only the server.
+dev-tools = []
 
 # Issue #1112: serve the built web dashboard at /ui (runtime opt-in: SERVE_DASHBOARD=true).
 # Build with --no-default-features --features classical-crypto to drop it.

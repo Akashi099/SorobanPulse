@@ -28,17 +28,39 @@ RUN cargo chef cook --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --
 
 # Stage 3: Build application (fast rebuild on source changes, dependencies cached)
 COPY . .
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
+# Issue #1441: build only the server. Development-only binaries (seed, code
+# generators, tooling) are behind the `dev-tools` feature and must never end up
+# in the production image.
+RUN cargo build --release --bin soroban-pulse ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
 
-# Final stage: Runtime image (minimal size, < 80 MB)
+# Base runtime used by both the production and tools images.
 # gcr.io/distroless/cc-debian12 — digest pinned 2025-07-14. Update via Dependabot or manually with:
 # docker inspect --format='{{index .RepoDigests 0}}' gcr.io/distroless/cc-debian12
 # distroless/cc ships glibc + libssl + ca-certificates, so no apt-get layer is needed.
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9b8f8b1a1b6b0b6f3f0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e
-
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9b8f8b1a1b6b0b6f3f0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e AS runtime-base
 WORKDIR /app
+
+# Optional tools image: `docker build --target tools -t soroban-pulse-tools .`
+# Used by e2e/demo seeding and code generation; not part of the production image.
+FROM builder AS tools-builder
+RUN cargo build --release --features dev-tools --bins
+
+FROM runtime-base AS tools
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/seed .
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/gen_env_docs .
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/gen_config_docs .
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/gen_openapi .
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/dump_openapi .
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/gen_postman .
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/gen_subscription_scaffold .
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/pg_tuning_advisor .
+COPY --from=tools-builder --chown=nonroot:nonroot /app/target/release/schema_cli .
+COPY --from=builder --chown=nonroot:nonroot /app/migrations ./migrations
+USER nonroot:nonroot
+
+# Final stage: production runtime image (minimal size, server binary only).
+FROM runtime-base AS production
 COPY --from=builder --chown=nonroot:nonroot /app/target/release/soroban-pulse .
-COPY --from=builder --chown=nonroot:nonroot /app/target/release/seed .
 COPY --from=builder --chown=nonroot:nonroot /app/migrations ./migrations
 COPY --from=web --chown=nonroot:nonroot /src/web/dist ./web/dist
 

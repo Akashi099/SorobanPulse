@@ -13,7 +13,7 @@ CPU count, expected connection count, and storage type, it computes a starting
 `postgresql.conf` configuration and explains the reasoning behind each value.
 
 ```bash
-cargo run --bin pg_tuning_advisor -- \
+cargo run --features dev-tools --bin pg_tuning_advisor -- \
   --memory-mb 16384 \
   --cpu-count 8 \
   --max-connections 200 \

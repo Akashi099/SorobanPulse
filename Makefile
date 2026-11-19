@@ -57,6 +57,9 @@ docker-up: ## Start the full stack via Docker Compose and wait for app to be hea
 docker-down: ## Tear down the Docker Compose stack
 	docker-compose down
 
+docker-tools: ## Build the tools image with the dev-only binaries (e2e/demo seeding, codegen)
+	docker build --target tools -t soroban-pulse-tools .
+
 migrate: ## Run pending database migrations
 	cargo sqlx migrate run
 
@@ -64,10 +67,10 @@ migrate-down: ## Rollback the most recent migration
 	cargo sqlx migrate revert
 
 seed: ## Seed the database with realistic dev/demo data (EVENTS=500 to override volume)
-	cargo run --bin seed -- --events $${EVENTS:-500}
+	cargo run --features dev-tools --bin seed -- --events $${EVENTS:-500}
 
 seed-large: ## Seed 100 000 events for performance testing
-	cargo run --bin seed -- --events 100000
+	cargo run --features dev-tools --bin seed -- --events 100000
 
 check-migrations: ## Check for duplicate migration timestamps
 	@bash scripts/check-migrations.sh
@@ -77,30 +80,30 @@ clean: ## Remove build artifacts
 	rm -f openapi.json
 
 gen-env-docs: ## Generate docs/configuration.md from src/config.rs @env tags
-	cargo run --bin gen_env_docs -- --write
+	cargo run --features dev-tools --bin gen_env_docs -- --write
 
 check-env-docs: ## Fail if docs/configuration.md is out of sync with src/config.rs
-	cargo run --bin gen_env_docs -- --check
+	cargo run --features dev-tools --bin gen_env_docs -- --check
 
 gen-openapi: ## Regenerate openapi.json from handler signatures and sync docs/openapi.json
-	cargo run --bin gen_openapi > openapi.json
+	cargo run --features dev-tools --bin gen_openapi > openapi.json
 	cp openapi.json docs/openapi.json
 
 gen-config-docs: ## Regenerate docs/configuration.md and .env.example from src/config/reference.rs
-	cargo run --bin gen_config_docs
+	cargo run --features dev-tools --bin gen_config_docs
 
 docs: ## Build the documentation site (docs/site) and check every doc is in the navigation
 	cp openapi.json docs/site/static/openapi.json
 	cd docs/site && npm ci && npm run check-nav && npm run build
 
 gen-postman: gen-openapi ## Regenerate Postman collection and environment files from OpenAPI spec
-	cargo run --bin gen_postman -- --input openapi.json --output-dir postman/
+	cargo run --features dev-tools --bin gen_postman -- --input openapi.json --output-dir postman/
 changelog: ## Generate changelog from git history (requires git-cliff)
 	@command -v git-cliff >/dev/null 2>&1 || { echo "git-cliff not installed. Install with: cargo install git-cliff"; exit 1; }
 	git-cliff --unreleased
 
 generate-sdk: ## Generate TypeScript and Python SDKs from OpenAPI spec
-	cargo run --bin gen_openapi > openapi.json
+	cargo run --features dev-tools --bin gen_openapi > openapi.json
 	# Generate TypeScript SDK
 	npx @openapitools/openapi-generator-cli generate \
 		-i openapi.json \

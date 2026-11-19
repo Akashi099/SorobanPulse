@@ -342,7 +342,7 @@ All middleware lives under `src/middleware/` and is assembled by `middleware/bui
 
 | Binary | Purpose |
 |---|---|
-| `gen_openapi.rs` | Dumps the OpenAPI spec to stdout. Run with `cargo run --bin gen_openapi`. |
+| `gen_openapi.rs` | Dumps the OpenAPI spec to stdout. Run with `cargo run --features dev-tools --bin gen_openapi`. |
 | `dump_openapi.rs` | Alternative OpenAPI dump with additional formatting options. |
 | `schema_cli.rs` | CLI for inspecting and validating contract schemas. |
 | `gen_subscription_scaffold.rs` | Generates a typed subscription handler scaffold for a given contract. |

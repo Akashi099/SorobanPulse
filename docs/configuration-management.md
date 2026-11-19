@@ -234,7 +234,7 @@ The `config_validation::config_schema()` function returns a structured
 
 ```bash
 # Dump the schema as JSON (requires the schema-cli binary)
-cargo run --bin schema_cli -- dump-config-schema | jq .
+cargo run --features dev-tools --bin schema_cli -- dump-config-schema | jq .
 ```
 
 This powers the documentation auto-generation pipeline. Keep

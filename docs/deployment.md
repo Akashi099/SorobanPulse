@@ -1,5 +1,21 @@
 # Deployment Guide
 
+## Container Image Targets
+
+The `Dockerfile` builds two targets:
+
+- `production` (the default target): the `soroban-pulse` server binary, the SQL
+  migrations and the bundled web dashboard. Development-only binaries are never
+  copied in.
+- `tools`: the development-only binaries (`seed`, `gen_env_docs`,
+  `gen_config_docs`, `gen_openapi`, `dump_openapi`, `gen_postman`,
+  `gen_subscription_scaffold`, `pg_tuning_advisor`, `schema_cli`) for e2e/demo
+  seeding and code generation. Build it explicitly with `make docker-tools` or
+  `docker build --target tools -t soroban-pulse-tools .`
+
+Those binaries are behind the `dev-tools` Cargo feature, so a plain
+`cargo build --release` and the production image both exclude them.
+
 ## Installing from the Helm repository
 
 The Helm chart in `helm/soroban-pulse/` is published to GitHub Pages (the

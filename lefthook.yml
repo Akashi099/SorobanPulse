@@ -13,5 +13,5 @@ pre-commit:
       run: cargo deny check
       glob: "Cargo.toml"
     gen-openapi:
-      run: cargo run --bin gen_openapi > openapi.json && cp openapi.json docs/openapi.json && git add openapi.json docs/openapi.json
+      run: cargo run --features dev-tools --bin gen_openapi > openapi.json && cp openapi.json docs/openapi.json && git add openapi.json docs/openapi.json
       glob: "*.rs"
