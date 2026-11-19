@@ -15,10 +15,13 @@ A lightweight Rust backend service that indexes Soroban smart contract events on
 
 ## Tech Stack
 
-- **Rust** + **Axum** (web framework)
+- **Rust** + **Axum** 0.8 / **tower-http** (web framework, WebSockets via `axum::extract::ws`)
 - **Tokio** (async runtime)
 - **PostgreSQL** + **SQLx** (database + migrations)
-- **Stellar Soroban RPC** (event source)
+- **utoipa** (OpenAPI generation), **async-graphql** (GraphQL)
+- **metrics** + **metrics-exporter-prometheus** (Prometheus metrics)
+- **Stellar Soroban RPC** + **stellar-xdr** 26 (event source and XDR decoding)
+- Optional integrations behind cargo features: `kafka`, `pubsub`, `kinesis`, `archive` (S3), `parquet`, `redis-queue`, `lua`, `otel`
 
 ## Architecture
 
