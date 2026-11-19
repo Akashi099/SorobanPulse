@@ -1,4 +1,15 @@
+<p align="center"><img src="docs/assets/brand/logo-horizontal.svg" alt="SorobanPulse" width="360"></p>
+
 # Soroban Pulse
+
+<p align="center">
+  <a href="https://codespaces.new/Soroban-Pulse/SorobanPulse?quickstart=1">
+    <img src="https://github.com/codespaces/badge.svg" alt="Open in GitHub Codespaces" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" />
+  </a>
+</p>
 
 A lightweight Rust backend service that indexes Soroban smart contract events on the Stellar network and exposes them via a REST API.
 
@@ -28,20 +39,66 @@ Key features:
 ## Project Structure
 
 ```
-src/
-├── main.rs       # Entry point, wires everything together
-├── config.rs     # Environment config
-├── db.rs         # DB pool + migrations
-├── models.rs     # Data types (Event, RPC response shapes)
-├── indexer.rs    # Background event polling worker
-├── routes.rs     # Axum router
-├── handlers.rs   # Request handlers
-└── error.rs      # Unified error type
-migrations/
-└── 20260314000000_create_events.sql
+SorobanPulse/
+├── src/                   # Rust backend service (100+ modules)
+│   ├── main.rs            # Binary entry point — wires everything together
+│   ├── lib.rs             # Library crate root (shared by tests and binaries)
+│   ├── middleware/        # Axum middleware stack (auth, rate-limit, security headers, …)
+│   ├── models/            # Shared data types (Event, RPC shapes, notification types)
+│   ├── codegen/           # OpenAPI, webhook, and subscription code generators
+│   ├── warehouse/         # Data warehouse export (BigQuery, Snowflake)
+│   ├── crypto/            # Cryptographic primitives (HMAC, encryption, quantum-ready)
+│   ├── costs/             # Per-tenant cost tracking and forecasting
+│   └── bin/               # Stand-alone utility binaries (gen_openapi, schema_cli, …)
+├── migrations/            # 140+ SQLx migration files (up + down)
+├── tests/                 # Integration, e2e, contract, property, and security tests
+├── benches/               # Criterion micro-benchmarks (pagination, DB queries, compression)
+├── sdk/                   # Client SDKs: TypeScript, Python, Go, JavaScript
+├── cli/                   # `spulse` command-line tool (Rust)
+├── frontend/              # React event-explorer UI (Vite + TypeScript)
+├── dashboard/             # Built-in ops dashboard served at /ui
+├── packages/feed-widget/  # <soroban-pulse-feed> embeddable web component
+├── web/                   # Public-facing marketing / docs site
+├── vscode-extension/      # VS Code extension for contract event inspection
+├── helm/                  # Helm chart for Kubernetes deployment
+├── terraform/             # Terraform IaC (AWS, GCP, multi-region)
+├── k8s/                   # Raw Kubernetes manifests (deployment, HPA, Istio, Linkerd)
+├── gitops/                # ArgoCD application definitions
+├── edge/                  # Cloudflare Worker edge-cache layer
+├── fuzz/                  # cargo-fuzz targets
+├── design/                # Design tokens and component CSS
+├── scripts/               # Helper shell scripts (CI checks, backups, migrations)
+├── docs/                  # All documentation (architecture, runbooks, ADRs, guides)
+└── notification_templates/ # Handlebars email templates (i18n)
 ```
 
+For a detailed breakdown of every `src/` module grouped by domain, see **[docs/module-map.md](docs/module-map.md)**.
+
 See [docs/schema.md](docs/schema.md) for a detailed description of the database schema, indexes, constraints, and an ER diagram.
+
+## Documentation
+
+- [Tutorial: token transfer alert bot](docs/tutorials/token-alert-bot.md) — index a testnet token and post large transfers to Discord.
+- [Configuration reference](docs/configuration.md) — every environment variable with its type, default and feature flag.
+- [Developer onboarding guide](docs/onboarding.md) — start here if you're new: a day-1 checklist and fixes for the most common first-build issues.
+- [Stellar & Soroban glossary](docs/glossary.md) — plain-language definitions of ledger, TOID, ScVal, XDR, Strkey, SAC, SEP-41, TTL/archival, RPC retention, and Soroban events 101.
+- [Module map](docs/module-map.md) — every `src/` module grouped by domain with one-line descriptions and "where do I start?" guidance.
+- [Development environment setup](docs/development-setup.md) — OS-specific setup, IDE/editor configuration, pre-commit hooks, debugging tools, and performance profiling.
+- [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
+- [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
+- [SDK integration guide](docs/sdk-integration-guide.md) — using the TypeScript, Python, and Go SDKs: auth, subscriptions, streaming, and error handling.
+- [SDK development guide](docs/sdk-development.md) — building and extending the SDKs themselves: architecture, per-language tutorials, and webhook verification.
+- [Subscription best practices](docs/subscription-best-practices.md) covers filter optimization, delivery frequency, retry/backoff guidance, performance benchmarks, monitoring, common patterns, and anti-patterns.
+- [Troubleshooting decision tree](docs/troubleshooting-guide.md) — symptom-first navigation into the detailed [troubleshooting guide](docs/troubleshooting.md) and runbooks.
+- [Contract event schemas](docs/contract-event-schemas.md) documents Stellar contract event patterns, XDR encoding, event data types, examples, and validation rules.
+- [Multi-deployment architecture](docs/multi-deployment-architecture.md) covers geo-redundancy, failover, cross-region sync, multi-cloud deployment, and consistency trade-offs.
+- [Data retention policy](docs/data-retention.md) explains default retention periods, archival, GDPR procedures, deletion workflows, and audit trail retention.
+- [Web dashboard](docs/dashboard.md) — the built-in UI served at `/ui` (`SERVE_DASHBOARD=true`), its caching and Content-Security-Policy.
+- [Embeddable feed widget](packages/feed-widget/README.md) — the `<soroban-pulse-feed>` web component for showing contract activity on your own site, including CORS and API-key guidance.
+- [Design system](docs/design/design-system.md) — design tokens, component specs and usage guidelines. Brand assets are in [docs/assets/brand](docs/assets/brand/README.md).
+- [Cargo feature matrix](docs/features.md) — every cargo feature, what it enables, its dependencies, and how to build custom images.
+- [Platform integration guide](docs/guides/integration-guide.md) — GitHub, Discord, Slack and Telegram notification setup.
+- [Design specs / RFCs](docs/rfcs/README.md) and [historical implementation reports](docs/archive/README.md).
 
 ## Setup
 
@@ -61,26 +118,29 @@ cp .env.example .env
 
 Open the newly created `.env` file in your editor and fill in your own real values. Be sure to replace the placeholder credentials (e.g., `<USER>`, `<PASSWORD>`) with your actual database and network details.
 
-| Variable          | Description                          | Default                                  |
-|-------------------|--------------------------------------|------------------------------------------|
-| `DATABASE_URL`    | PostgreSQL connection string         | required                                 |
-| `STELLAR_RPC_URL` | Soroban RPC endpoint                 | `https://soroban-testnet.stellar.org`    |
-| `DB_MAX_CONNECTIONS` | Max number of connections in the Postgres pool | `10` |
-| `DB_MIN_CONNECTIONS` | Min number of connections in the Postgres pool | `1` |
-| `START_LEDGER`    | Ledger to start indexing from (0 = latest) | `0`                               |
-| `PORT`            | HTTP server port                     | `3000`                                   |
-| `RUST_LOG`        | Log verbosity level (`trace`, `debug`, `info`, `warn`, `error`) | `info` |
-| `API_KEY`         | Optional key for API authentication  | (disabled)                               |
-| `ADMIN_API_KEY`   | Key required for `/v1/admin/*` endpoints (independent of `API_KEY`) | (disabled) |
-| `RUST_LOG_FORMAT` | Log output format (`text` or `json`) | `text`                                   |
-| `INDEXER_LAG_WARN_THRESHOLD` | Indexer lag warning threshold (ledgers) | `100`                                   |
-| `HEALTH_CHECK_TIMEOUT_MS`   | Timeout for the health check DB ping     | `2000`                                  |
-| `INDEX_CHECK_INTERVAL_HOURS` | How often the index usage monitor runs (hours) | `24`                             |
-| `RATE_LIMIT_PER_MINUTE` | Maximum requests per IP per minute (0 = unlimited) | `60`                         |
-| `SSE_KEEPALIVE_SECS` | SSE keep-alive ping interval in seconds (1–60) | `15`                              |
-| `INDEXER_LOCK_RETRY_SECS` | How often standby replicas retry the advisory lock | `30`                    |
-| `SLOW_QUERY_THRESHOLD_MS` | Queries exceeding this duration are logged at WARN and counted in metrics | `1000` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry OTLP collector endpoint (when built with `otel` feature) | `http://localhost:4317` |
+For the full list of all environment variables with defaults and descriptions, see **[docs/configuration.md](docs/configuration.md)**.
+
+The table is auto-generated from `src/config.rs` — run `make gen-env-docs` to refresh it.
+
+The most common variables to set are:
+
+| Variable | Description | Default |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string | required |
+| `STELLAR_RPC_URL` | Soroban RPC endpoint | `https://soroban-testnet.stellar.org` |
+| `PORT` | HTTP server port | `3000` |
+| `API_KEY` | Optional key for API authentication | (disabled) |
+| `RUST_LOG` | Log verbosity level | `info` |
+The essentials:
+
+- `DATABASE_URL` — PostgreSQL connection string (required)
+- `STELLAR_RPC_URL` — Soroban RPC endpoint (default `https://soroban-testnet.stellar.org`)
+- `START_LEDGER` — ledger to start indexing from (default `0` = latest)
+- `PORT` — HTTP server port (default `3000`)
+- `API_KEY` / `ADMIN_API_KEY` — API and admin authentication (disabled when unset)
+- `RUST_LOG` — log verbosity (default `info`)
+
+Every other setting is listed in the [configuration reference](docs/configuration.md), which is generated from `src/config/reference.rs` (`make gen-config-docs`) and checked in CI.
 
 > **Note on Authentication:** You can enable optional API key authentication by setting the `API_KEY` environment variable. When set, all requests (except `/health` and `/healthz/*` endpoints) will require either an `Authorization: Bearer <API_KEY>` or an `X-Api-Key: <API_KEY>` header. If `API_KEY` is unset or omitted from your configuration, authentication is bypassed and all requests pass through.
 
@@ -124,9 +184,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer workflow.
 The project employs a comprehensive testing strategy across multiple dimensions:
 
 - **Unit & Integration Tests**: Standard test suite (`make test`)
-- **Property-Based Tests**: Discover edge cases with `proptest` — see [docs/property-testing.md](docs/property-testing.md)
+- **Property-Based Tests**: Discover edge cases with `proptest` — see [docs/property-based-testing.md](docs/property-based-testing.md)
 - **Mutation Testing**: Evaluate test coverage quality with `cargo-mutants` — see [docs/mutation-testing.md](docs/mutation-testing.md)
 - **API Contract Tests**: Verify client-server API compatibility — see [docs/contract-testing.md](docs/contract-testing.md)
+- **Security Tests**: OWASP Top 10, auth bypass, crypto verification, regression tests — see [docs/security-testing.md](docs/security-testing.md)
 
 Run tests locally:
 ```bash
@@ -142,6 +203,20 @@ make -f Makefile.mutations mutants
 
 # Contract tests (verify API compatibility)
 cargo test --test contract_tests
+
+# Security tests (OWASP, auth bypass, crypto, regression — no DB needed)
+make security-tests
+
+# Full security suite (tests + dependency audit + secrets scan)
+make security
+```
+
+### Web UI
+
+A React front end with an event explorer, global search, status page, admin console and light/dark themes lives in [`frontend/`](frontend/README.md):
+
+```bash
+cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
 ## API
@@ -520,3 +595,22 @@ The service defaults to `info` level internally, but the environment variable mu
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, branch naming, commit conventions, and the PR process.
+
+## Community
+
+- [Code of Conduct](CODE_OF_CONDUCT.md) — the Contributor Covenant 2.1 and how to report violations.
+- [Governance](GOVERNANCE.md) — roles, how decisions and RFCs are made, and how to become a maintainer.
+- [Maintainers](MAINTAINERS.md) — who owns which area of the codebase (mirrored in [`.github/CODEOWNERS`](.github/CODEOWNERS)).
+
+## Security
+
+Please **do not** report security vulnerabilities through public GitHub issues.
+See [SECURITY.md](SECURITY.md) for supported versions and how to report a
+vulnerability privately via GitHub Security Advisories.
+
+## License
+
+Soroban Pulse is licensed under the [MIT License](LICENSE). Unless you
+explicitly state otherwise, any contribution you intentionally submit for
+inclusion in this project is licensed as above, without any additional terms or
+conditions.
