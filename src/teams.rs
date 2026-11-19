@@ -53,6 +53,42 @@ impl TeamsClient {
         })
     }
 
+    /// Send a plain Adaptive Card confirming the integration works
+    /// (`POST /v1/subscriptions/{id}/test`, issue #1348).
+    pub async fn send_test_message(
+        &self,
+        subscription_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let payload = Self::test_payload(subscription_id);
+        let response = self.client.post(&self.webhook_url).json(&payload).send().await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(format!("Teams API error ({status}): {body}").into())
+        }
+    }
+
+    /// Message envelope for the integration test card.
+    pub fn test_payload(subscription_id: &str) -> Value {
+        json!({
+            "type": "message",
+            "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                        { "type": "TextBlock", "text": "Soroban Pulse test notification", "weight": "Bolder", "size": "Medium" },
+                        { "type": "TextBlock", "text": format!("Subscription {subscription_id} is connected to this Teams channel."), "wrap": true }
+                    ]
+                }
+            }]
+        })
+    }
+
     /// Builds the Adaptive Card body for an event, with optional @-mentions
     /// and action buttons.
     fn build_card(
@@ -256,6 +292,15 @@ mod tests {
             tenant_id: "default".to_string(),
             total_count: 0,
         }
+    }
+
+    #[test]
+    fn test_test_payload_is_adaptive_card() {
+        let p = TeamsClient::test_payload("sub-1");
+        assert_eq!(p["type"], "message");
+        let content = &p["attachments"][0]["content"];
+        assert_eq!(content["type"], "AdaptiveCard");
+        assert!(content["body"][1]["text"].as_str().unwrap_or_default().contains("sub-1"));
     }
 
     #[test]

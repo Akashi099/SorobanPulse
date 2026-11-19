@@ -229,3 +229,20 @@ setup, etc.) remains on each client's own methods — the trait only standardize
 To add a new chat-style channel: implement `channel_name()` and `send_event_notification()`
 for your client type in `notification_channel.rs`, delegating to the client's own
 notification method as the Discord and Telegram implementations do.
+
+## Microsoft Teams (Incoming Webhooks)
+
+Teams notifications use an [Incoming Webhook](https://learn.microsoft.com/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook)
+and are rendered as Adaptive Cards. `src/teams.rs` holds the formatting code, and the
+channel implements `NotificationChannel`.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/subscriptions/{id}/integrations/teams` | Create or replace the webhook (`{"webhook_url": "https://..."}`) |
+| `GET` | `/v1/subscriptions/{id}/integrations/teams` | Show the integration, with the webhook URL masked |
+| `DELETE` | `/v1/subscriptions/{id}/integrations/teams` | Remove the integration |
+| `POST` | `/v1/subscriptions/{id}/test` | Send a test Adaptive Card to the configured Teams channel |
+
+The webhook URL is stored encrypted in `teams_integrations.webhook_url`. It is an
+`enc:v1:` AES-256-GCM envelope keyed by `INTEGRATION_ENCRYPTION_KEY`, and a CHECK
+constraint enforces this. Only `https` URLs are accepted.

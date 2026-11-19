@@ -1105,3 +1105,164 @@ mod callback_url_tests {
         assert!(validate_callback_url("https://example.com/cb").is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Microsoft Teams integration (issue #1348)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TeamsIntegrationRequest {
+    /// Teams Incoming Webhook URL. Stored encrypted (it embeds a secret).
+    pub webhook_url: String,
+}
+
+/// Reject anything that is not an `https` URL.
+fn validate_teams_webhook_url(url: &str) -> Result<(), (StatusCode, String)> {
+    match url::Url::parse(url) {
+        Ok(u) if u.scheme() == "https" && u.host_str().is_some() => Ok(()),
+        _ => Err((StatusCode::BAD_REQUEST, "webhook_url must be an absolute https URL".to_string())),
+    }
+}
+
+/// `POST /v1/subscriptions/{id}/integrations/teams`
+pub async fn setup_teams_integration(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+    Json(req): Json<TeamsIntegrationRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    validate_teams_webhook_url(&req.webhook_url)?;
+    let id = Uuid::new_v4();
+    let webhook_url = integration_secrets::seal(&req.webhook_url).map_err(secret_error)?;
+
+    sqlx::query(
+        "INSERT INTO teams_integrations (id, subscription_id, webhook_url)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (subscription_id) DO UPDATE SET
+             webhook_url = EXCLUDED.webhook_url,
+             updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(id)
+    .bind(subscription_id)
+    .bind(&webhook_url)
+    .execute(&pool)
+    .await
+    .map_err(|e| {
+        error!(error = %e, subscription_id = %subscription_id, "Failed to setup Teams integration");
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to setup Teams integration".to_string())
+    })?;
+
+    info!(subscription_id = %subscription_id, "Teams integration setup successful");
+    Ok((
+        StatusCode::CREATED,
+        Json(IntegrationResponse {
+            id,
+            integration_type: "teams".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }),
+    ))
+}
+
+/// `GET /v1/subscriptions/{id}/integrations/teams` — webhook URL is masked.
+pub async fn get_teams_integration(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let row = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, webhook_url FROM teams_integrations WHERE subscription_id = $1",
+    )
+    .bind(subscription_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| {
+        error!(error = %e, "Failed to fetch Teams integration");
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch integration".to_string())
+    })?;
+
+    match row {
+        Some((id, webhook_url)) => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "id": id,
+                "integration_type": "teams",
+                "webhook_url": integration_secrets::mask_stored(&webhook_url),
+            })),
+        )),
+        None => Err((StatusCode::NOT_FOUND, "Integration not found".to_string())),
+    }
+}
+
+/// `DELETE /v1/subscriptions/{id}/integrations/teams`
+pub async fn delete_teams_integration(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let result = sqlx::query("DELETE FROM teams_integrations WHERE subscription_id = $1")
+        .bind(subscription_id)
+        .execute(&pool)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Failed to delete Teams integration");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete integration".to_string())
+        })?;
+
+    if result.rows_affected() > 0 {
+        info!(subscription_id = %subscription_id, "Teams integration deleted");
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "Integration not found".to_string()))
+    }
+}
+
+/// `POST /v1/subscriptions/{id}/test` — send a test message to every
+/// configured chat integration for the subscription (currently Teams).
+pub async fn test_subscription_integrations(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let teams = sqlx::query_scalar::<_, String>(
+        "SELECT webhook_url FROM teams_integrations WHERE subscription_id = $1",
+    )
+    .bind(subscription_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| {
+        error!(error = %e, "Failed to load integrations for test");
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load integrations".to_string())
+    })?;
+
+    let mut results = serde_json::Map::new();
+    if let Some(stored) = teams {
+        let webhook_url = integration_secrets::open(&stored).map_err(secret_error)?;
+        let outcome = match crate::teams::TeamsClient::new(crate::teams::TeamsConfig { webhook_url }) {
+            Ok(client) => client
+                .send_test_message(&subscription_id.to_string())
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        results.insert(
+            "teams".to_string(),
+            match outcome {
+                Ok(()) => json!({ "delivered": true }),
+                Err(e) => json!({ "delivered": false, "error": e }),
+            },
+        );
+    }
+
+    if results.is_empty() {
+        return Err((StatusCode::NOT_FOUND, "No integrations configured for this subscription".to_string()));
+    }
+    Ok((StatusCode::OK, Json(json!({ "subscription_id": subscription_id, "results": results }))))
+}
+
+#[cfg(test)]
+mod teams_tests {
+    use super::*;
+
+    #[test]
+    fn teams_webhook_must_be_https() {
+        assert!(validate_teams_webhook_url("https://example.webhook.office.com/webhookb2/x").is_ok());
+        assert!(validate_teams_webhook_url("http://example.webhook.office.com/x").is_err());
+        assert!(validate_teams_webhook_url("not a url").is_err());
+    }
+}

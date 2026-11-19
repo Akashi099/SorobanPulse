@@ -588,6 +588,8 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/pool-config", axum::routing::get(handlers::get_pool_tuning_guide))
         .route("/admin/pool-config/statistics", axum::routing::get(handlers::get_pool_statistics))
         .route("/admin/pool-config/health", axum::routing::get(handlers::get_pool_health))
+        // Issue #1345: pg_stat_statements slow-query digest
+        .route("/admin/slow-queries", axum::routing::get(handlers::get_slow_queries))
         .route("/contracts/{id}/resources", axum::routing::get(handlers::get_contract_resources))
         .route("/admin/indexer/gaps", axum::routing::get(handlers::get_indexer_gaps))
         .route("/admin/pool-config/adaptive", axum::routing::get(handlers::get_adaptive_pool_status))
@@ -721,6 +723,9 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/subscriptions/{id}/integrations/github", axum::routing::post(crate::integration_handlers::setup_github_integration).get(crate::integration_handlers::get_github_integration).delete(crate::integration_handlers::delete_github_integration))
         // Issue #675: Discord integration
         .route("/subscriptions/{id}/integrations/discord", axum::routing::post(crate::integration_handlers::setup_discord_integration).get(crate::integration_handlers::get_discord_integration).delete(crate::integration_handlers::delete_discord_integration))
+        // Issue #1348: Microsoft Teams integration
+        .route("/subscriptions/{id}/integrations/teams", axum::routing::post(crate::integration_handlers::setup_teams_integration).get(crate::integration_handlers::get_teams_integration).delete(crate::integration_handlers::delete_teams_integration))
+        .route("/subscriptions/{id}/test", axum::routing::post(crate::integration_handlers::test_subscription_integrations))
         // Issue #676: Slack integration
         .route("/subscriptions/{id}/integrations/slack", axum::routing::post(crate::integration_handlers::setup_slack_integration).get(crate::integration_handlers::get_slack_integration).delete(crate::integration_handlers::delete_slack_integration))
         // Issue #677: Telegram integration
