@@ -9,6 +9,7 @@ pub mod rpc_endpoints;
 pub mod contract_resource_stats;
 pub mod backfill;
 pub mod abi;
+pub mod app;
 pub mod advisory_lock;
 pub mod aggregation;
 pub mod alert_manager;

@@ -647,3 +647,31 @@ k6 run -e ADMIN_API_KEY=your-admin-key \
 | Webhook delivery | 1 000 ms | 5 % |
 
 If any CI job reports a regression, the workflow exits with a non-zero code and blocks the merge. Investigate using the artifact JSON and the Grafana dashboard (`docs/grafana-dashboard.json`) before updating baselines.
+
+## Slow-query digest (`GET /v1/admin/slow-queries`)
+
+Each index-monitor run (`index_monitor::spawn`) also reads the
+`pg_stat_statements` extension. It logs the 10 slowest statements whose
+`mean_exec_time` exceeds `SLOW_QUERY_THRESHOLD_MS` (default `500`) at `WARN`
+level and increments `soroban_pulse_slow_queries_total{query_type="digest"}`
+once per run.
+
+The same digest is available on demand from an admin endpoint (it needs `ADMIN_API_KEY`):
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_API_KEY" http://localhost:3000/v1/admin/slow-queries
+```
+
+```json
+{
+  "threshold_ms": 500.0,
+  "queries": [
+    { "query": "SELECT ... FROM events WHERE ...", "calls": 1200,
+      "mean_exec_time_ms": 812.4, "total_exec_time_ms": 974880.0, "rows": 1200 }
+  ]
+}
+```
+
+If `pg_stat_statements` is not installed, the endpoint returns `503`. To enable it, add
+`shared_preload_libraries = 'pg_stat_statements'` and run
+`CREATE EXTENSION pg_stat_statements;`.

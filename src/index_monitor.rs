@@ -846,6 +846,81 @@ pub async fn run_schema_health_check(pool: &PgPool) {
     tracing::info!("Schema health check complete");
 }
 
+// ---------------------------------------------------------------------------
+// Slow-query digest (issue #1345)
+// ---------------------------------------------------------------------------
+
+/// Default `SLOW_QUERY_THRESHOLD_MS` when unset or invalid.
+pub const DEFAULT_SLOW_QUERY_THRESHOLD_MS: f64 = 500.0;
+
+/// Number of statements returned by the digest.
+pub const SLOW_QUERY_DIGEST_LIMIT: i64 = 10;
+
+/// One row of the `pg_stat_statements` slow-query digest.
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct SlowQuery {
+    pub query: String,
+    pub calls: i64,
+    pub mean_exec_time_ms: f64,
+    pub total_exec_time_ms: f64,
+    pub rows: i64,
+}
+
+/// Mean-execution-time threshold read from `SLOW_QUERY_THRESHOLD_MS`.
+pub fn slow_query_threshold_ms() -> f64 {
+    parse_slow_query_threshold(std::env::var("SLOW_QUERY_THRESHOLD_MS").ok().as_deref())
+}
+
+fn parse_slow_query_threshold(raw: Option<&str>) -> f64 {
+    raw.and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(DEFAULT_SLOW_QUERY_THRESHOLD_MS)
+}
+
+/// Top [`SLOW_QUERY_DIGEST_LIMIT`] statements from `pg_stat_statements` whose
+/// `mean_exec_time` exceeds `threshold_ms`, slowest first.
+///
+/// Fails if the `pg_stat_statements` extension is not installed.
+pub async fn fetch_slow_queries(pool: &PgPool, threshold_ms: f64) -> Result<Vec<SlowQuery>, sqlx::Error> {
+    sqlx::query_as::<_, SlowQuery>(
+        "SELECT query,
+                calls::BIGINT AS calls,
+                mean_exec_time::DOUBLE PRECISION AS mean_exec_time_ms,
+                total_exec_time::DOUBLE PRECISION AS total_exec_time_ms,
+                rows::BIGINT AS rows
+         FROM pg_stat_statements
+         WHERE mean_exec_time > $1
+         ORDER BY mean_exec_time DESC
+         LIMIT $2",
+    )
+    .bind(threshold_ms)
+    .bind(SLOW_QUERY_DIGEST_LIMIT)
+    .fetch_all(pool)
+    .await
+}
+
+/// Log the slow-query digest at WARN and bump
+/// `soroban_pulse_slow_queries_total{query_type="digest"}` once per run.
+pub async fn run_slow_query_digest(pool: &PgPool) {
+    crate::metrics::record_slow_query("digest");
+    let threshold_ms = slow_query_threshold_ms();
+    match fetch_slow_queries(pool, threshold_ms).await {
+        Ok(queries) => {
+            for (rank, q) in queries.iter().enumerate() {
+                tracing::warn!(
+                    rank = rank + 1,
+                    mean_exec_time_ms = q.mean_exec_time_ms,
+                    calls = q.calls,
+                    threshold_ms,
+                    query = %q.query,
+                    "Slow query digest"
+                );
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "pg_stat_statements unavailable; skipping slow-query digest"),
+    }
+}
+
 /// Spawn the index monitoring background task.
 ///
 /// Runs every `interval_hours` hours. Stops when `shutdown_rx` fires.
@@ -873,6 +948,8 @@ pub fn spawn(
                     run_schema_health_check(&pool).await;
                     // #1263: Feed indexer lag into the incident correlation engine
                     check_indexer_lag(&pool).await;
+                    // #1345: pg_stat_statements slow-query digest
+                    run_slow_query_digest(&pool).await;
                 }
                 _ = shutdown_rx.changed() => {
                     tracing::debug!("Index monitor shutting down");
@@ -890,6 +967,14 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_query_threshold_parsing() {
+        assert_eq!(parse_slow_query_threshold(None), DEFAULT_SLOW_QUERY_THRESHOLD_MS);
+        assert_eq!(parse_slow_query_threshold(Some("250")), 250.0);
+        assert_eq!(parse_slow_query_threshold(Some("-1")), DEFAULT_SLOW_QUERY_THRESHOLD_MS);
+        assert_eq!(parse_slow_query_threshold(Some("abc")), DEFAULT_SLOW_QUERY_THRESHOLD_MS);
+    }
 
     fn make_stats(rows: &[(&str, &str, i64)]) -> Vec<IndexScanStats> {
         rows.iter()
