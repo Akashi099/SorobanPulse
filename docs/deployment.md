@@ -1,5 +1,19 @@
 # Deployment Guide
 
+## Container Image Targets
+
+The `Dockerfile` builds two targets:
+
+- `production` (the default target): the `soroban-pulse` server binary and the
+  SQL migrations. Development-only binaries are never copied in.
+- `tools`: the development-only binaries (`gen_openapi`, `dump_openapi`,
+  `gen_postman`, `gen_subscription_scaffold`) for e2e/demo seeding and code
+  generation. Build it explicitly with `make docker-tools` or
+  `docker build --target tools -t soroban-pulse-tools .`
+
+Those binaries are behind the `dev-tools` Cargo feature, so a plain
+`cargo build --release` and the production image both exclude them.
+
 ## Resource Sizing
 
 ### Recommended defaults

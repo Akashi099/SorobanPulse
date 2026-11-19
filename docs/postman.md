@@ -10,16 +10,16 @@ Soroban Pulse OpenAPI spec.
 make gen-postman
 
 # Or pipe the spec manually
-cargo run --bin gen_openapi | cargo run --bin gen_postman
+cargo run --features dev-tools --bin gen_openapi | cargo run --features dev-tools --bin gen_postman
 
 # From a saved spec file
-cargo run --bin gen_postman -- --input openapi.json
+cargo run --features dev-tools --bin gen_postman -- --input openapi.json
 
 # Custom output directory
-cargo run --bin gen_postman -- --input openapi.json --output-dir postman/
+cargo run --features dev-tools --bin gen_postman -- --input openapi.json --output-dir postman/
 
 # Dry-run: print the collection JSON to stdout
-cargo run --bin gen_postman -- --dry-run < openapi.json
+cargo run --features dev-tools --bin gen_postman -- --dry-run < openapi.json
 ```
 
 ## Output

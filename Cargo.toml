@@ -92,6 +92,9 @@ tokio-tungstenite = "0.21"
 
 [features]
 default = []
+# Issue #1441: development-only binaries (code generators, scaffolders, OpenAPI
+# dumps) are gated so `cargo build --release` produces only the server.
+dev-tools = []
 otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk"]
 zipkin = ["dep:opentelemetry", "dep:opentelemetry-zipkin", "dep:opentelemetry_sdk"]
 encryption = ["dep:aes-gcm", "dep:rand"]
@@ -128,13 +131,27 @@ version = "53"
 version = "0.19"
 optional = true
 
+# Issue #1441: development-only binaries. They are not built unless the
+# `dev-tools` feature is enabled, keeping production images free of them.
+[[bin]]
+name = "gen_openapi"
+path = "src/bin/gen_openapi.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "dump_openapi"
+path = "src/bin/dump_openapi.rs"
+required-features = ["dev-tools"]
+
 [[bin]]
 name = "gen_postman"
 path = "src/bin/gen_postman.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "gen_subscription_scaffold"
 path = "src/bin/gen_subscription_scaffold.rs"
+required-features = ["dev-tools"]
 
 [[bench]]
 name = "pagination"

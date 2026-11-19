@@ -40,6 +40,9 @@ docker-up: ## Start the full stack via Docker Compose and wait for app to be hea
 docker-down: ## Tear down the Docker Compose stack
 	docker-compose down
 
+docker-tools: ## Build the tools image with the dev-only binaries (e2e/demo seeding, codegen)
+	docker build --target tools -t soroban-pulse-tools .
+
 migrate: ## Run pending database migrations
 	cargo sqlx migrate run
 
@@ -54,17 +57,17 @@ clean: ## Remove build artifacts
 	rm -f openapi.json
 
 gen-openapi: ## Regenerate openapi.json from handler signatures and sync docs/openapi.json
-	cargo run --bin gen_openapi > openapi.json
+	cargo run --features dev-tools --bin gen_openapi > openapi.json
 	cp openapi.json docs/openapi.json
 
 gen-postman: gen-openapi ## Regenerate Postman collection and environment files from OpenAPI spec
-	cargo run --bin gen_postman -- --input openapi.json --output-dir postman/
+	cargo run --features dev-tools --bin gen_postman -- --input openapi.json --output-dir postman/
 changelog: ## Generate changelog from git history (requires git-cliff)
 	@command -v git-cliff >/dev/null 2>&1 || { echo "git-cliff not installed. Install with: cargo install git-cliff"; exit 1; }
 	git-cliff --unreleased
 
 generate-sdk: ## Generate TypeScript and Python SDKs from OpenAPI spec
-	cargo run --bin gen_openapi > openapi.json
+	cargo run --features dev-tools --bin gen_openapi > openapi.json
 	# Generate TypeScript SDK
 	npx @openapitools/openapi-generator-cli generate \
 		-i openapi.json \

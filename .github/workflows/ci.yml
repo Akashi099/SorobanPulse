@@ -352,7 +352,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - run: sudo apt-get install -y pkg-config libssl-dev
       - name: Generate OpenAPI spec
-        run: cargo run --bin gen_openapi > /tmp/openapi-generated.json
+        run: cargo run --features dev-tools --bin gen_openapi > /tmp/openapi-generated.json
       - name: Check openapi.json is up to date
         run: |
           if ! diff -q openapi.json /tmp/openapi-generated.json > /dev/null 2>&1; then
