@@ -63,6 +63,32 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  workflow-lint:
+    name: Workflow lint & conflict markers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Fail on unresolved merge-conflict markers
+        run: |
+          if git grep -nE '^(<<<<<<<|=======|>>>>>>>)( |$)' -- . ':!*.snap'; then
+            echo "::error::Unresolved merge-conflict markers found"
+            exit 1
+          fi
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color .github/workflows/*.yml
+
+  machete:
+    name: Unused dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - run: cargo machete
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
@@ -116,7 +142,6 @@ jobs:
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
       - name: Run migration round-trip
         run: bash scripts/migration-roundtrip.sh migrations
-=======
 
   validate-sdk:
     name: Validate SDKs
@@ -910,6 +935,8 @@ jobs:
     if: always()
     needs:
       - fmt
+      - workflow-lint
+      - machete
       - deny
       - check-migrations
       - migration-roundtrip
