@@ -324,3 +324,24 @@ pub async fn get_statistics_health(
         timestamp: chrono::Utc::now(),
     }))
 }
+
+/// `GET /v1/admin/slow-queries` — top 10 statements from `pg_stat_statements`
+/// whose mean execution time exceeds `SLOW_QUERY_THRESHOLD_MS` (issue #1345).
+pub async fn get_slow_queries(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let threshold_ms = crate::index_monitor::slow_query_threshold_ms();
+    match crate::index_monitor::fetch_slow_queries(&state.db, threshold_ms).await {
+        Ok(queries) => Ok(Json(serde_json::json!({
+            "threshold_ms": threshold_ms,
+            "queries": queries,
+        }))),
+        Err(e) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "pg_stat_statements is not available",
+                "detail": e.to_string(),
+            })),
+        )),
+    }
+}
