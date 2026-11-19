@@ -863,9 +863,9 @@ pub async fn get_event_stats(State(state): State<AppState>) -> Result<impl IntoR
     let events_last_24h: i64 = window_row.try_get("events_last_24h")?;
     let events_last_7d: i64 = window_row.try_get("events_last_7d")?;
 
-    // Top 10 contracts from events_contract_summary matview
+    // Top 10 contracts from the canonical contract summary matview
     let top_rows = sqlx::query_as::<_, (String, i64)>(
-        "SELECT contract_id, event_count FROM events_contract_summary ORDER BY event_count DESC LIMIT 10",
+        "SELECT contract_id, event_count FROM mv_contract_summary ORDER BY event_count DESC LIMIT 10",
     )
     .fetch_all(&state.read_pool)
     .await?;
@@ -1040,11 +1040,18 @@ pub async fn get_contract_stats_history(
     let rows = sqlx::query(
         r#"
         SELECT d::date AS date,
-               COALESCE(m.event_count, 0)::bigint AS event_count,
-               COALESCE(m.unique_tx_count, 0)::bigint AS unique_tx_count
+               COALESCE(s.event_count, 0)::bigint AS event_count,
+               COALESCE(s.unique_tx_count, 0)::bigint AS unique_tx_count
         FROM generate_series($2::date, $3::date, interval '1 day') AS d
-        LEFT JOIN mv_contract_summary m
-          ON m.contract_id = $1 AND m.event_date = d::date
+        LEFT JOIN (
+            SELECT timestamp::date AS event_date,
+                   COUNT(*) AS event_count,
+                   COUNT(DISTINCT tx_hash) AS unique_tx_count
+            FROM events
+            WHERE contract_id = $1
+              AND timestamp::date BETWEEN $2::date AND $3::date
+            GROUP BY timestamp::date
+        ) s ON s.event_date = d::date
         ORDER BY d::date ASC
         "#,
     )
@@ -4838,10 +4845,10 @@ pub async fn get_contract_summary(
         }
     }
 
-    // Try materialized view first
+    // Try the canonical materialized view first
     let mv_row = sqlx::query(
-        "SELECT total_events, first_event_at, last_event_at, min_ledger, max_ledger, \
-         unique_tx_count, contract_events, diagnostic_events, system_events \
+        "SELECT event_count, first_event_timestamp, latest_event_timestamp, min_ledger, \
+         max_ledger, unique_tx_count, contract_events, diagnostic_events, system_events \
          FROM mv_contract_summary WHERE contract_id = $1",
     )
     .bind(&contract_id)
@@ -4852,9 +4859,9 @@ pub async fn get_contract_summary(
         Ok(Some(row)) => {
             ContractDetailSummary {
                 contract_id: contract_id.clone(),
-                total_events: row.try_get("total_events")?,
-                first_event_at: row.try_get("first_event_at")?,
-                last_event_at: row.try_get("last_event_at")?,
+                total_events: row.try_get("event_count")?,
+                first_event_at: row.try_get("first_event_timestamp")?,
+                last_event_at: row.try_get("latest_event_timestamp")?,
                 unique_tx_count: row.try_get("unique_tx_count")?,
                 ledger_range: LedgerRange {
                     min: row.try_get("min_ledger")?,
