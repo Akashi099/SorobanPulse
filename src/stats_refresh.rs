@@ -7,7 +7,6 @@ use tracing::{error, info, warn};
 
 const VIEWS: &[&str] = &[
     "events_daily_summary",
-    "events_contract_summary",
     "mv_contract_summary",
     "events_hourly_volume",
     "mv_contract_event_counts",
@@ -172,7 +171,8 @@ pub async fn check_staleness(pool: &PgPool) {
 }
 
 /// Update the per-contract event count Prometheus gauges for the Grafana
-/// "Contract Popularity Top-10" panel (#695). Reads from `events_contract_summary`.
+/// "Contract Popularity Top-10" panel (#695). Reads from the canonical
+/// `mv_contract_summary`.
 pub async fn update_contract_event_count_metrics(pool: &PgPool) {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
@@ -183,7 +183,7 @@ pub async fn update_contract_event_count_metrics(pool: &PgPool) {
     };
 
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT contract_id, event_count FROM events_contract_summary ORDER BY event_count DESC LIMIT 20",
+        "SELECT contract_id, event_count FROM mv_contract_summary ORDER BY event_count DESC LIMIT 20",
     )
     .fetch_all(&mut *conn)
     .await

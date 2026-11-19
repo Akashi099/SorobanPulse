@@ -773,7 +773,7 @@ async fn stats_requires_auth_when_key_configured(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn contract_history_returns_daily_buckets_from_matview(pool: PgPool) {
+async fn contract_history_returns_daily_buckets(pool: PgPool) {
     let contract_id = "CH23456789012345678901234567890123456789012345678901234X";
     for (day, tx_hash) in [
         (
@@ -800,11 +800,6 @@ async fn contract_history_returns_daily_buckets_from_matview(pool: PgPool) {
         .await
         .unwrap();
     }
-    sqlx::query("REFRESH MATERIALIZED VIEW mv_contract_summary")
-        .execute(&pool)
-        .await
-        .unwrap();
-
     let app = make_router(pool, None);
     let resp = app.oneshot(Request::builder()
         .uri(format!("/v1/contracts/{contract_id}/stats/history?bucket=1d&from=2026-05-28&to=2026-05-30"))

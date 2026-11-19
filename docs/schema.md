@@ -210,8 +210,9 @@ ALTER ROLE soroban_pulse SET plan_cache_mode = force_custom_plan;
 | File | Description |
 |------|-------------|
 | `20260428000002_matview_daily_summary.sql` | Create `events_daily_summary` materialized view and its unique index. |
-| `20260428000003_matview_contract_summary.sql` | Create `events_contract_summary` materialized view and its unique index. |
+| `20260428000003_matview_contract_summary.sql` | Create `events_contract_summary` materialized view and its unique index (the view was consolidated into `mv_contract_summary` by `20261119000001`). |
 | `20260428000004_matview_hourly_volume.sql` | Create `events_hourly_volume` materialized view and its unique index. |
+| `20261119000001_canonical_contract_summary.sql` | Drop the duplicate contract summary views and create the canonical `mv_contract_summary` with its unique index. |
 
 ---
 
@@ -239,12 +240,23 @@ GROUP BY DATE(timestamp), event_type;
 
 **Used by:** `GET /v1/events/stats` — per-type totals and 24h/7d windowed counts.
 
-### `events_contract_summary`
+### `mv_contract_summary`
 
-Pre-computes total event count and latest ledger per contract.
+Canonical per-contract summary. It replaced the duplicate
+`events_contract_summary` view in migration `20261119000001` (issue #1442).
 
 ```sql
-SELECT contract_id, COUNT(*) AS event_count, MAX(ledger) AS latest_ledger
+SELECT
+    contract_id,
+    COUNT(*)                              AS event_count,
+    MIN(timestamp)                        AS first_event_timestamp,
+    MAX(timestamp)                        AS latest_event_timestamp,
+    MIN(ledger)                           AS min_ledger,
+    MAX(ledger)                           AS max_ledger,
+    COUNT(DISTINCT tx_hash)               AS unique_tx_count,
+    COUNT(*) FILTER (WHERE event_type = 'contract')   AS contract_events,
+    COUNT(*) FILTER (WHERE event_type = 'diagnostic') AS diagnostic_events,
+    COUNT(*) FILTER (WHERE event_type = 'system')     AS system_events
 FROM events
 GROUP BY contract_id;
 ```
@@ -253,9 +265,17 @@ GROUP BY contract_id;
 |--------|------|-------------|
 | `contract_id` | `TEXT` | Stellar contract address (unique key) |
 | `event_count` | `BIGINT` | Total events emitted by this contract |
-| `latest_ledger` | `BIGINT` | Highest ledger sequence seen for this contract |
+| `first_event_timestamp` | `TIMESTAMPTZ` | Timestamp of the contract's first event |
+| `latest_event_timestamp` | `TIMESTAMPTZ` | Timestamp of the contract's most recent event |
+| `min_ledger` / `max_ledger` | `BIGINT` | Ledger range seen for this contract |
+| `unique_tx_count` | `BIGINT` | Distinct transactions that emitted events |
+| `contract_events` / `diagnostic_events` / `system_events` | `BIGINT` | Event count per type |
 
-**Used by:** `GET /v1/events/stats` — top 10 contracts by event count.
+The unique index on `contract_id` is required for `REFRESH MATERIALIZED
+VIEW CONCURRENTLY`.
+
+**Used by:** `GET /v1/events/stats` (top contracts), `GET
+/v1/contracts/{contract_id}/summary`, and the contract popularity metrics.
 
 ### `events_hourly_volume`
 

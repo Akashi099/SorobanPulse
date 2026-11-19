@@ -105,9 +105,9 @@ pub async fn get_event_stats(State(state): State<AppState>) -> Result<impl IntoR
     let events_last_24h: i64 = window_row.try_get("events_last_24h")?;
     let events_last_7d: i64 = window_row.try_get("events_last_7d")?;
 
-    // Top 10 contracts from events_contract_summary matview
+    // Top 10 contracts from the canonical contract summary matview
     let top_rows = sqlx::query_as::<_, (String, i64)>(
-        "SELECT contract_id, event_count FROM events_contract_summary ORDER BY event_count DESC LIMIT 10",
+        "SELECT contract_id, event_count FROM mv_contract_summary ORDER BY event_count DESC LIMIT 10",
     )
     .fetch_all(&state.read_pool)
     .await?;
