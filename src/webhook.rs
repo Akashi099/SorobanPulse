@@ -1,9 +1,9 @@
-use hmac::{Hmac, Mac};
+use hmac::Mac;
 use reqwest::Client;
-use sha2::Sha256;
+use sqlx::Row;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Span};
 use uuid::Uuid;
 
 /// Validate that `url` is reachable and returns a 2xx response.
@@ -27,7 +27,6 @@ pub async fn validate_webhook_url(url: &str) -> Result<(), String> {
 use crate::{metrics, models::SorobanEvent, webhook_template::WebhookTemplate};
 use serde_json::Value;
 
-type HmacSha256 = Hmac<Sha256>;
 
 /// Transform webhook payload using a template (Issue #678).
 /// Returns the transformed payload or the original event if template is invalid.
@@ -49,8 +48,7 @@ pub fn transform_webhook_payload(
 
 /// Sign a payload with HMAC-SHA256 and return the hex digest.
 pub fn sign_payload(secret: &str, body: &[u8]) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    let mut mac = crate::hmac_util::hmac_sha256(secret.as_bytes());
     mac.update(body);
     let result = mac.finalize();
     hex::encode(result.into_bytes())
@@ -115,6 +113,8 @@ pub async fn deliver(
 ///
 /// All parameters are owned so the resulting future is `'static` and safe to
 /// pass to `tokio::spawn`.
+///
+/// See docs/adr/0003-webhook-retry-strategy.md for the design rationale.
 pub async fn deliver_with_retry_policy(
     client: Client,
     url: String,
@@ -124,6 +124,25 @@ pub async fn deliver_with_retry_policy(
     retry_policy: &crate::retry_policy::RetryPolicy,
     priority: String,
 ) {
+    // Create a root span for the entire delivery lifecycle
+    #[cfg(feature = "full-observability")]
+    let root_span = tracing::info_span!(
+        "webhook_delivery",
+        webhook_url = %url,
+        contract_id = %event.contract_id,
+        tx_hash = %event.tx_hash,
+        priority = %priority,
+    );
+
+    #[cfg(not(feature = "full-observability"))]
+    let root_span = tracing::info_span!(
+        "webhook_delivery",
+        webhook_url = %url,
+        contract_id = %event.contract_id,
+    );
+
+    let _enter = root_span.enter();
+
     // Check suppression list before attempting delivery (Issue #490)
     if let Some(pool) = pool {
         match sqlx::query_scalar::<_, i64>(
@@ -144,8 +163,27 @@ pub async fn deliver_with_retry_policy(
         }
     }
 
-    let body = match serde_json::to_vec(&event) {
-        Ok(b) => b,
+    if let Some(pool) = pool {
+        match endpoint_rate_limited(pool, &url).await {
+            Ok(Some(next_retry_at)) => {
+                enqueue_endpoint_retry(
+                    pool,
+                    &url,
+                    &event,
+                    &secret,
+                    "endpoint rate limited",
+                    next_retry_at,
+                )
+                .await;
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => warn!(error = %e, url = %url, "Failed to check webhook endpoint rate limit"),
+        }
+    }
+
+    let mut payload = match serde_json::to_value(&event) {
+        Ok(value) => value,
         Err(e) => {
             error!(error = %e, "Failed to serialize event for webhook delivery");
             return;
@@ -166,6 +204,22 @@ pub async fn deliver_with_retry_policy(
     let signature = secret.as_deref().map(|s| sign_payload(s, &body));
     let priority_owned = priority.clone();
 
+    let log_pool = pool.cloned();
+    let log_url = url.clone();
+    let log_request_headers = {
+        let mut headers = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("X-Notification-Priority".to_string(), priority_owned.clone()),
+        ];
+        if let Some(ref sig) = signature {
+            headers.push(("X-Signature-256".to_string(), format!("sha256={sig}")));
+        }
+        headers
+    };
+    let log_request_body = payload.clone();
+    let log_contract_id = event.contract_id.clone();
+    let log_event_type = event.event_type.to_string();
+
     let result = retry_policy
         .execute_with_retry(|attempt| {
             let client = client.clone();
@@ -173,8 +227,30 @@ pub async fn deliver_with_retry_policy(
             let body = body.clone();
             let signature = signature.clone();
             let priority_header = priority_owned.clone();
+            let log_pool = log_pool.clone();
+            let log_url = log_url.clone();
+            let log_request_headers = log_request_headers.clone();
+            let log_request_body = log_request_body.clone();
+            let log_contract_id = log_contract_id.clone();
+            let log_event_type = log_event_type.clone();
 
             async move {
+                // Create a child span for this attempt
+                #[cfg(feature = "full-observability")]
+                let attempt_span = tracing::info_span!(
+                    "webhook_attempt",
+                    attempt = attempt,
+                    parent: &tracing::Span::current(),
+                );
+
+                #[cfg(not(feature = "full-observability"))]
+                let attempt_span = tracing::info_span!(
+                    "webhook_attempt",
+                    attempt = attempt,
+                );
+
+                let _enter = attempt_span.enter();
+
                 let mut req = client
                     .post(&url)
                     .header("Content-Type", "application/json")
@@ -185,34 +261,99 @@ pub async fn deliver_with_retry_policy(
                     req = req.header("X-Signature-256", format!("sha256={sig}"));
                 }
 
-                match req.send().await {
+                // Create a span for the HTTP send
+                #[cfg(feature = "full-observability")]
+                let send_span = tracing::info_span!("webhook_http_send");
+
+                #[cfg(not(feature = "full-observability"))]
+                let send_span = tracing::info_span!("webhook_http_send");
+
+                let _send_enter = send_span.enter();
+
+                let started_at = std::time::Instant::now();
+                let send_result = req.send().await;
+                let duration_ms = started_at.elapsed().as_millis() as i64;
+                drop(_send_enter);
+
+                // Record the notification delivery cost for this attempt,
+                // attributed to the webhook component (Issue #1264).
+                crate::costs::calculator::record_notification_cost(
+                    "webhook",
+                    duration_ms as u64,
+                );
+
+                let outcome = match send_result {
                     Ok(resp) if resp.status().is_success() => {
                         info!(
                             url = %url,
                             contract_id = %event.contract_id,
                             attempt = attempt,
                             priority = %event.event_type,
+                            duration_ms = duration_ms,
                             "Webhook delivered successfully"
                         );
                         crate::metrics::record_webhook_delivery_success();
-                        Ok(())
+                        let status = resp.status().as_u16() as i32;
+                        let body_text = resp.text().await.unwrap_or_default();
+                        (Ok(()), Some(status), body_text)
                     }
                     Ok(resp) => {
-                        let error_msg = format!(
-                            "HTTP {}: {}",
-                            resp.status(),
-                            resp.text().await.unwrap_or_default()
-                        );
-                        Err(error_msg)
+                        let status = resp.status().as_u16() as i32;
+                        let body_text = resp.text().await.unwrap_or_default();
+                        let error_msg = format!("HTTP {status}: {body_text}");
+                        (Err(error_msg), Some(status), body_text)
                     }
-                    Err(e) => Err(format!("Request error: {}", e)),
+                    Err(e) => (Err(format!("Request error: {}", e)), None, String::new()),
+                };
+
+                // Best-effort request/response log, spawned so it never
+                // slows down delivery/retry timing (Issue #937).
+                if let Some(pool) = log_pool {
+                    let response_body: Option<Value> = if outcome.2.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            serde_json::from_str(&outcome.2)
+                                .unwrap_or_else(|_| serde_json::json!({"raw": outcome.2})),
+                        )
+                    };
+                    let response_status = outcome.1;
+                    let request_headers = log_request_headers.clone();
+                    let request_body = log_request_body.clone();
+                    let contract_id = log_contract_id.clone();
+                    let event_type = log_event_type.clone();
+                    let url_for_log = log_url.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::webhook_logging::log_exchange(
+                            &pool,
+                            crate::webhook_logging::WebhookLogEntry {
+                                url: &url_for_log,
+                                request_headers: &request_headers,
+                                request_body: &request_body,
+                                response_status,
+                                response_body: response_body.as_ref(),
+                                duration_ms,
+                                contract_id: Some(&contract_id),
+                                event_type: Some(&event_type),
+                            },
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "Failed to store webhook request/response log");
+                        }
+                    });
                 }
+
+                outcome.0
             }
         })
         .await;
 
     match result {
         Ok(()) => {
+            if let Some(pool) = pool {
+                record_endpoint_success(pool, &url).await;
+            }
             // Record the notification for escalation tracking (Issue #493).
             if let Some(pool) = pool {
                 let notification_id = Uuid::new_v4();
@@ -241,9 +382,12 @@ pub async fn deliver_with_retry_policy(
                 "Webhook delivery failed after all retries"
             );
 
+            #[cfg(feature = "full-observability")]
+            metrics::record_webhook_trace_error();
+
             if let Some(pool) = pool {
+                let next_retry = record_endpoint_failure(pool, &url).await;
                 let payload_val = serde_json::to_value(&event).unwrap_or(serde_json::json!({}));
-                let next_retry = chrono::Utc::now() + chrono::Duration::seconds(60);
 
                 if let Err(e) = sqlx::query(
                     "INSERT INTO webhook_failures \
@@ -260,10 +404,121 @@ pub async fn deliver_with_retry_policy(
                 {
                     error!(error = %e, "Failed to insert webhook failure into DLQ");
                 }
+
+                // Move the exhausted delivery into the webhook DLQ (Issue #1260).
+                if let Err(e) = enqueue_dlq(pool, None, &event, &error_msg).await {
+                    error!(error = %e, url = %url, "Failed to insert webhook into DLQ");
+                }
             }
 
             metrics::record_webhook_failure();
         }
+    }
+}
+
+async fn endpoint_rate_limited(
+    pool: &sqlx::PgPool,
+    url: &str,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, sqlx::Error> {
+    let row = sqlx::query(
+        "INSERT INTO rate_limit_endpoints (endpoint_url, window_start, window_count) \
+         VALUES ($1, NOW(), 1) \
+         ON CONFLICT (endpoint_url) DO UPDATE SET \
+             window_start = CASE \
+                 WHEN rate_limit_endpoints.window_start < NOW() - INTERVAL '1 minute' THEN NOW() \
+                 ELSE rate_limit_endpoints.window_start END, \
+             window_count = CASE \
+                 WHEN rate_limit_endpoints.window_start < NOW() - INTERVAL '1 minute' THEN 1 \
+                 ELSE rate_limit_endpoints.window_count + 1 END, \
+             updated_at = NOW() \
+         RETURNING per_minute_limit, window_count, backoff_until",
+    )
+    .bind(url)
+    .fetch_one(pool)
+    .await?;
+
+    let limit: i32 = row.try_get("per_minute_limit")?;
+    let count: i32 = row.try_get("window_count")?;
+    let backoff_until: Option<chrono::DateTime<chrono::Utc>> = row.try_get("backoff_until")?;
+    let now = chrono::Utc::now();
+    if let Some(backoff_until) = backoff_until {
+        if backoff_until > now {
+            return Ok(Some(backoff_until));
+        }
+    }
+    if count > limit {
+        return Ok(Some(now + chrono::Duration::seconds(60)));
+    }
+    Ok(None)
+}
+
+async fn record_endpoint_success(pool: &sqlx::PgPool, url: &str) {
+    if let Err(e) = sqlx::query(
+        "UPDATE rate_limit_endpoints \
+         SET consecutive_failures = 0, health_status = 'healthy', \
+             backoff_until = NULL, updated_at = NOW() \
+         WHERE endpoint_url = $1",
+    )
+    .bind(url)
+    .execute(pool)
+    .await
+    {
+        warn!(error = %e, url = %url, "Failed to record webhook endpoint success");
+    }
+}
+
+async fn record_endpoint_failure(
+    pool: &sqlx::PgPool,
+    url: &str,
+) -> chrono::DateTime<chrono::Utc> {
+    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(60);
+    if let Err(e) = sqlx::query(
+        "UPDATE rate_limit_endpoints \
+         SET consecutive_failures = consecutive_failures + 1, \
+             health_status = CASE \
+                 WHEN consecutive_failures + 1 >= 3 THEN 'unhealthy' \
+                 ELSE 'degraded' END, \
+             backoff_until = NOW() + make_interval( \
+                 secs => LEAST(900, POWER(2, LEAST(consecutive_failures + 1, 10))::int)), \
+             updated_at = NOW() \
+         WHERE endpoint_url = $1",
+    )
+    .bind(url)
+    .execute(pool)
+    .await
+    {
+        warn!(error = %e, url = %url, "Failed to record webhook endpoint failure");
+    }
+    next_retry
+}
+
+async fn enqueue_endpoint_retry(
+    pool: &sqlx::PgPool,
+    url: &str,
+    event: &SorobanEvent,
+    secret: &Option<String>,
+    reason: &str,
+    next_retry_at: chrono::DateTime<chrono::Utc>,
+) {
+    let payload = serde_json::to_value(event).unwrap_or(serde_json::json!({}));
+    let secret_hash = secret.as_deref().map(|s| {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(s.as_bytes()))
+    });
+    if let Err(e) = sqlx::query(
+        "INSERT INTO webhook_retry_queue \
+         (url, payload, secret_hash, attempt, max_attempts, next_retry_at, last_error, status) \
+         VALUES ($1, $2, $3, 0, 5, $4, $5, 'pending')",
+    )
+    .bind(url)
+    .bind(payload)
+    .bind(secret_hash)
+    .bind(next_retry_at)
+    .bind(reason)
+    .execute(pool)
+    .await
+    {
+        error!(error = %e, url = %url, "Failed to enqueue endpoint-specific webhook retry");
     }
 }
 
@@ -377,9 +632,135 @@ pub async fn deliver_with_failover(
         {
             error!(error = %e, "Failed to insert webhook failure into DLQ");
         }
+
+        // Move the exhausted delivery into the webhook DLQ (Issue #1260).
+        if let Err(e) = enqueue_dlq(pool, None, &event, "Primary and failover both failed").await {
+            error!(error = %e, "Failed to insert webhook into DLQ");
+        }
     }
     metrics::record_webhook_failure();
     false
+}
+
+/// Insert an exhausted webhook delivery into the `webhook_dlq` table and
+/// refresh the DLQ depth gauge (Issue #1260).
+pub async fn enqueue_dlq(
+    pool: &sqlx::PgPool,
+    subscription_id: Option<Uuid>,
+    event: &SorobanEvent,
+    last_error: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let payload = serde_json::to_value(event).unwrap_or(serde_json::json!({}));
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO webhook_dlq \
+         (subscription_id, event_id, payload, last_error, failed_at) \
+         VALUES ($1, $2, $3, $4, NOW()) \
+         RETURNING id",
+    )
+    .bind(subscription_id)
+    .bind(&event.tx_hash)
+    .bind(payload)
+    .bind(last_error)
+    .fetch_one(pool)
+    .await?;
+
+    refresh_dlq_depth(pool).await;
+    Ok(id)
+}
+
+/// Recompute the `soroban_pulse_webhook_dlq_depth` gauge from the table.
+pub async fn refresh_dlq_depth(pool: &sqlx::PgPool) {
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM webhook_dlq WHERE replayed_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    {
+        Ok(depth) => metrics::set_webhook_dlq_depth(depth),
+        Err(e) => warn!(error = %e, "Failed to compute webhook DLQ depth"),
+    }
+}
+
+/// Re-enqueue a single DLQ row into the normal delivery queue and mark it
+/// replayed (Issue #1260). Returns `Ok(false)` if the row does not exist or
+/// has already been replayed.
+pub async fn replay_dlq_entry(pool: &sqlx::PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT payload, last_error FROM webhook_dlq \
+         WHERE id = $1 AND replayed_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(false);
+    };
+
+    let payload: Value = row.try_get("payload")?;
+    let last_error: Option<String> = row.try_get("last_error").ok();
+    let event: SorobanEvent = match serde_json::from_value(payload) {
+        Ok(event) => event,
+        Err(e) => {
+            warn!(error = %e, dlq_id = %id, "Failed to deserialize DLQ payload");
+            return Ok(false);
+        }
+    };
+
+    // Re-enter the normal delivery queue.
+    enqueue_endpoint_retry(
+        pool,
+        &event.contract_id,
+        &event,
+        &None,
+        last_error.as_deref().unwrap_or("replayed from DLQ"),
+        chrono::Utc::now(),
+    )
+    .await;
+
+    sqlx::query("UPDATE webhook_dlq SET replayed_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    refresh_dlq_depth(pool).await;
+    Ok(true)
+}
+
+/// Bulk replay of DLQ entries, optionally filtered by `subscription_id`
+/// (Issue #1260). Returns the number of entries replayed.
+pub async fn replay_dlq_bulk(
+    pool: &sqlx::PgPool,
+    subscription_id: Option<Uuid>,
+) -> Result<u64, sqlx::Error> {
+    let ids: Vec<Uuid> = match subscription_id {
+        Some(sub_id) => {
+            sqlx::query_scalar(
+                "SELECT id FROM webhook_dlq \
+                 WHERE replayed_at IS NULL AND subscription_id = $1",
+            )
+            .bind(sub_id)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_scalar("SELECT id FROM webhook_dlq WHERE replayed_at IS NULL")
+                .fetch_all(pool)
+                .await?
+        }
+    };
+
+    let mut replayed = 0u64;
+    for id in ids {
+        match replay_dlq_entry(pool, id).await {
+            Ok(true) => replayed += 1,
+            Ok(false) => {}
+            Err(e) => warn!(error = %e, dlq_id = %id, "Failed to replay DLQ entry"),
+        }
+    }
+
+    refresh_dlq_depth(pool).await;
+    Ok(replayed)
 }
 
 #[cfg(test)]

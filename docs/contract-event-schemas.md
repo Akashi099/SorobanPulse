@@ -127,6 +127,20 @@ The most common XDR `ScVal` types and their JSON equivalents:
 | `ScvMap` | JSON object |
 | `ScvVec` | JSON array |
 
+### Decoding Edge Cases
+
+These cases are covered by the `fuzz_xdr_scval` target and the
+`scval_format` unit tests:
+
+- JSON that does not deserialize as an `ScVal` (plain numbers, strings,
+  unknown tags, already-anonymized data) is returned unchanged by the
+  `native` and `xdr` renderings instead of erroring.
+- `i128` / `u128` values are rebuilt from their `hi`/`lo` parts and rendered
+  as decimal strings, including the extremes (`i128::MIN`, `u128::MAX`).
+- `vec: null` and `map: null` render as `[]` and `{}` in `native` format.
+- The `divide_by_decimals` normalizer rejects `decimals` above 18 (10^19
+  overflows `i64`) with an error instead of panicking.
+
 ### Decoding Topics Manually
 
 Topics are base64-encoded XDR `ScVal` values. To decode them:
@@ -182,6 +196,28 @@ GET /v1/events?event_type=contract
 - Events exceeding this limit are logged and skipped
 - The `soroban_pulse_events_oversized_total` counter tracks skipped events
 
+## Schema Validation Rules
+
+Use these rules when publishing or validating decoded contract events:
+
+- `contract_id` must be a valid Stellar contract strkey starting with `C`.
+- `tx_hash` and `ledger_hash`, when present, must be lowercase hex strings.
+- `ledger` must be a positive integer and `ledger_closed_at` must be an RFC 3339 timestamp.
+- `topic` must contain base64-encoded XDR `ScVal` segments, with `topic[0]` as a symbol for filterable contract events.
+- Numeric Soroban values larger than JavaScript's safe integer range must be serialized as strings.
+- `event_type` must be one of `contract`, `system`, or `diagnostic`.
+- `value` must be valid JSON and stay within `MAX_EVENT_DATA_BYTES`.
+
 ## Versioning
 
 The event schema is tied to the Soroban protocol version. Breaking changes are announced in `CHANGELOG.md` and the `schema_version` column in the database tracks the protocol version in effect when each event was stored.
+
+## SEP-41 token transfers
+
+`GET /v1/tokens/{contract_id}/transfers` returns decoded SEP-41 events
+(`transfer`, `mint`, `burn`, `clawback`, `approve`, `set_admin`,
+`set_authorized`) from the `token_transfers` table. Query parameters: `from`,
+`to`, `min_amount` (exact i128 decimal), `cursor` (`<ledger>:<event_id>` from
+`next_cursor`) and `limit`. Amounts are decimal strings. Unknown events are not
+decoded and remain unchanged in `events`. `POST /v1/admin/token-transfers/backfill`
+decodes already-indexed events.

@@ -1,6 +1,9 @@
-use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
-use std::time::Duration;
-use tracing::{debug, info, info_span, Instrument};
+//! Schema migrations and per-query timeout helpers. Pool construction lives
+//! in [`crate::db_pool`] (issue #1244).
+
+use sqlx::PgPool;
+use tracing::{info, info_span, Instrument};
+use crate::advisory_lock::{AdvisoryLock, AdvisoryLockConfig};
 
 /// Per-endpoint query timeout configuration (in milliseconds)
 pub struct QueryTimeouts {
@@ -17,44 +20,6 @@ impl Default for QueryTimeouts {
             expensive_query: 10000,
         }
     }
-}
-
-pub async fn create_pool(
-    database_url: &str,
-    db_max_connections: u32,
-    db_min_connections: u32,
-    db_statement_timeout_ms: u64,
-    db_idle_timeout_secs: u64,
-    db_max_lifetime_secs: u64,
-    db_test_before_acquire: bool,
-) -> Result<PgPool, sqlx::Error> {
-    info!(
-        min_connections = db_min_connections,
-        max_connections = db_max_connections,
-        statement_timeout_ms = db_statement_timeout_ms,
-        idle_timeout_secs = db_idle_timeout_secs,
-        max_lifetime_secs = db_max_lifetime_secs,
-        test_before_acquire = db_test_before_acquire,
-        "Configuring Postgres connection pool"
-    );
-
-    PgPoolOptions::new()
-        .max_connections(db_max_connections)
-        .min_connections(db_min_connections)
-        .idle_timeout(Duration::from_secs(db_idle_timeout_secs))
-        .max_lifetime(Duration::from_secs(db_max_lifetime_secs))
-        .test_before_acquire(db_test_before_acquire)
-        .after_connect(move |conn, _| {
-            Box::pin(async move {
-                conn.execute(
-                    format!("SET statement_timeout = '{db_statement_timeout_ms}ms'").as_str(),
-                )
-                .await
-                .map(|_| ())
-            })
-        })
-        .connect(database_url)
-        .await
 }
 
 /// Helper to set per-query timeout using SET LOCAL statement_timeout
@@ -82,13 +47,24 @@ pub async fn run_migrations(pool: &PgPool) -> Result<usize, sqlx::migrate::Migra
             .await
             .map_err(sqlx::migrate::MigrateError::from)?;
 
-        debug!(lock_id = MIGRATION_LOCK_ID, "Acquiring advisory lock");
-        sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(MIGRATION_LOCK_ID)
-            .execute(&mut *conn)
+        // Use the new AdvisoryLock with improved error handling and metrics
+        let config = AdvisoryLockConfig {
+            acquire_timeout_ms: 30000,
+            lock_timeout_ms: 5000,
+            max_retries: 3,
+        };
+        let lock = AdvisoryLock::with_config(MIGRATION_LOCK_ID, config);
+
+        // Validate connection before acquiring lock
+        lock.validate_connection(&mut conn)
             .await
-            .map_err(sqlx::migrate::MigrateError::from)?;
-        debug!(lock_id = MIGRATION_LOCK_ID, "Advisory lock acquired");
+            .map_err(|e| sqlx::Error::Configuration(format!("Connection validation failed: {}", e).into()))?;
+
+        // Acquire the advisory lock with retry logic
+        let lock_guard = lock
+            .acquire(&mut conn)
+            .await
+            .map_err(|e| sqlx::Error::Configuration(format!("Advisory lock acquisition failed: {}", e).into()))?;
 
         // Record which migrations are already applied before running, so we can
         // identify exactly which ones this run applies.
@@ -114,11 +90,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<usize, sqlx::migrate::Migra
         .unwrap_or_default();
 
         // Always release — ignore unlock errors so the migration result is returned.
-        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(MIGRATION_LOCK_ID)
-            .execute(&mut *conn)
-            .await;
-        debug!(lock_id = MIGRATION_LOCK_ID, "Advisory lock released");
+        let _ = lock.release(&mut conn, lock_guard).await;
 
         result?;
 
@@ -204,12 +176,5 @@ mod tests {
                 .await
                 .expect("ledger query must succeed");
         assert!(max_version > 0, "a positive max migration version is expected");
-    }
-
-    #[test]
-    fn create_pool_signature_accepts_new_options() {
-        // Verify the function signature compiles with all new parameters.
-        // Actual pool creation requires a live DB; this just validates types.
-        let _f: fn(&str, u32, u32, u64, u64, u64, bool) -> _ = create_pool;
     }
 }
