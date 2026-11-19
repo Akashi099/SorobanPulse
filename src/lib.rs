@@ -117,6 +117,7 @@ pub mod statistics_management;
 pub mod zero_trust;
 pub mod cloud_provider;
 pub mod cloud_replication;
+pub mod rpc_region;
 pub mod http3_support;
 pub mod notification_batching;
 pub mod notification_delivery;

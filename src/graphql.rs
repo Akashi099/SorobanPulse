@@ -499,9 +499,13 @@ pub struct Subscription;
 impl Subscription {
     /// Subscribe to new events matching optional filters
     /// Supports filtering by contract_id, event_type, tx_hash, and ledger range
+    ///
+    /// `contractId` (issue #1350) is a shorthand for `filter.contractId`; when
+    /// both are supplied the event must match both.
     async fn events(
         &self,
         ctx: &Context<'_>,
+        contract_id: Option<String>,
         filter: Option<EventFilter>,
     ) -> impl Stream<Item = Event> {
         let event_rx = ctx
@@ -520,6 +524,12 @@ impl Subscription {
                     Ok(e) => e,
                     Err(_) => return std::future::ready(None),
                 };
+
+                if let Some(ref cid) = contract_id {
+                    if event.contract_id != *cid {
+                        return std::future::ready(None);
+                    }
+                }
 
                 // Apply filters if provided
                 if let Some(ref f) = filter {

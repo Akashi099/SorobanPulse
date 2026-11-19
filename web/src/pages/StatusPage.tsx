@@ -17,13 +17,7 @@ export default function StatusPage() {
       {isError && <div className="error-banner">⚠ Could not reach the indexer API</div>}
 
       {data && (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-            gap: "1rem",
-          }}
-        >
+        <div className="ds-stat-grid">
           <InfoCard label="State" value={data.indexing ? "🟢 Indexing" : "🔴 Paused"} />
           <InfoCard label="Latest Ledger" value={data.latest_ledger.toLocaleString()} />
           {dataUpdatedAt > 0 && (
@@ -41,10 +35,10 @@ export default function StatusPage() {
 function InfoCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="card">
-      <p className="text-muted" style={{ fontSize: "0.75rem", marginBottom: "0.25rem" }}>
+      <p className="text-muted ds-text-xs ds-mb-1">
         {label}
       </p>
-      <p style={{ fontSize: "1.125rem", fontWeight: 600 }}>{value}</p>
+      <p className="ds-text-lg ds-font-semibold">{value}</p>
     </div>
   );
 }

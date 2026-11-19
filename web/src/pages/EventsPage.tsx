@@ -295,9 +295,9 @@ export default function EventsPage() {
         </div>
 
         {/* ── Events table ── */}
-        <div className="card" style={{ padding: 0 }}>
+        <div className="card ds-card--flush">
           {isError && (
-            <div className="error-banner" style={{ margin: "1rem" }}>
+            <div className="error-banner ds-m-4">
               ⚠ Failed to load events
             </div>
           )}
@@ -354,8 +354,7 @@ export default function EventsPage() {
                     <tr
                       key={e.id}
                       role="row"
-                      className={`row--clickable${isActive ? " row--active" : ""}`}
-                      style={{ opacity: isFetching && !isFetchingNextPage ? 0.6 : 1 }}
+                      className={`row--clickable${isActive ? " row--active" : ""}${isFetching && !isFetchingNextPage ? " ds-is-dimmed" : ""}`}
                       onClick={() => openDrawer(e)}
                       tabIndex={0}
                       aria-selected={isActive}
@@ -419,7 +418,7 @@ export default function EventsPage() {
                   {isFetchingNextPage ? "Loading…" : "Load more"}
                 </button>
               ) : (
-                <span className="text-muted" style={{ fontSize: "0.8125rem" }}>
+                <span className="text-muted ds-text-sm">
                   All {allEvents.length.toLocaleString()} events loaded
                 </span>
               )}

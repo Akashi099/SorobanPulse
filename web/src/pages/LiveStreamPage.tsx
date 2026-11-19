@@ -312,7 +312,7 @@ export default function LiveStreamPage() {
         </span>
 
         {/* Spacer */}
-        <span aria-hidden="true" style={{ flex: 1 }} />
+        <span aria-hidden="true" className="ds-spacer" />
 
         {/* Lag warning */}
         {lagInfo && (

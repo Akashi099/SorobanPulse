@@ -17,8 +17,9 @@ Substitute your deployed base URL as needed.
 7. [Error handling](#error-handling)
 8. [Server-Sent Events (SSE)](#server-sent-events-sse)
 9. [NDJSON export](#ndjson-export)
-10. [Contract resource statistics](#contract-resource-statistics)
-11. [Common curl recipes](#common-curl-recipes)
+10. [Parquet export](#parquet-export)
+11. [Contract resource statistics](#contract-resource-statistics)
+12. [Common curl recipes](#common-curl-recipes)
 
 ---
 
@@ -645,6 +646,62 @@ Example output:
 ```
 {"id":"uuid1","contract_id":"CABC...","event_type":"contract","ledger":1234567,...}
 {"id":"uuid2","contract_id":"CABC...","event_type":"contract","ledger":1234568,...}
+```
+
+---
+
+## Parquet export
+
+`GET /v1/events/export?format=parquet` downloads events as an
+[Apache Parquet](https://parquet.apache.org/) file for DuckDB, Pandas or Spark.
+The server must be built with the `parquet` feature
+(`cargo build --release --features parquet`); without it the endpoint returns
+`400` rather than silently falling back to CSV. Like every export format it
+requires an API key, and it accepts the same filters as CSV/NDJSON export
+(`contract_id`, `event_type`, `from_ledger`, `to_ledger`, `from_timestamp`,
+`to_timestamp`).
+
+```bash
+curl -H "X-Api-Key: $API_KEY" \
+  "http://localhost:3000/v1/events/export?format=parquet&contract_id=CABC..." \
+  -o events.parquet
+```
+
+Response headers:
+
+| Header | Value |
+|--------|-------|
+| `Content-Type` | `application/vnd.apache.parquet` |
+| `Content-Disposition` | `attachment; filename="events.parquet"` |
+
+With `Accept-Encoding: gzip` or `br` the body is compressed and the filename
+becomes `events.parquet.gz` / `events.parquet.br`.
+
+Schema (SNAPPY-compressed, defined in `src/parquet_export.rs`):
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UTF8 | Event UUID |
+| `contract_id` | UTF8 | |
+| `event_type` | UTF8 | |
+| `tx_hash` | UTF8 | |
+| `ledger` | INT64 | |
+| `timestamp_us` | INT64 | Microseconds since the Unix epoch |
+| `event_data` | UTF8 | JSON string |
+| `created_at_us` | INT64 | Microseconds since the Unix epoch |
+
+Reading the file:
+
+```sql
+-- DuckDB
+SELECT count(*) FROM read_parquet('events.parquet');
+SELECT contract_id, count(*) FROM read_parquet('events.parquet') GROUP BY 1;
+```
+
+```python
+import pandas as pd
+df = pd.read_parquet("events.parquet")
+df["timestamp"] = pd.to_datetime(df["timestamp_us"], unit="us", utc=True)
 ```
 
 ---

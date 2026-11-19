@@ -14,7 +14,6 @@ interface JsonNodeProps {
 
 function JsonNode({ data, depth = 0 }: JsonNodeProps) {
   const [open, setOpen] = useState(depth < 2);
-  const indent = depth * 16;
 
   if (data === null) return <span className="json-null">null</span>;
   if (typeof data === "boolean")
@@ -30,7 +29,6 @@ function JsonNode({ data, depth = 0 }: JsonNodeProps) {
       <span>
         <button
           className="json-toggle"
-          style={{ marginLeft: indent }}
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
         >
@@ -39,7 +37,7 @@ function JsonNode({ data, depth = 0 }: JsonNodeProps) {
         {open && (
           <span className="json-block">
             {data.map((v, i) => (
-              <div key={i} style={{ paddingLeft: indent + 16 }}>
+              <div key={i} className="ds-json-child">
                 <JsonNode data={v} depth={depth + 1} />
                 {i < data.length - 1 && <span className="json-comma">,</span>}
               </div>
@@ -58,7 +56,6 @@ function JsonNode({ data, depth = 0 }: JsonNodeProps) {
       <span>
         <button
           className="json-toggle"
-          style={{ marginLeft: indent }}
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
         >
@@ -69,7 +66,7 @@ function JsonNode({ data, depth = 0 }: JsonNodeProps) {
         {open && (
           <span className="json-block">
             {entries.map(([k, v], i) => (
-              <div key={k} style={{ paddingLeft: indent + 16 }}>
+              <div key={k} className="ds-json-child">
                 <span className="json-key">&quot;{k}&quot;</span>
                 <span className="json-colon">: </span>
                 <JsonNode data={v} depth={depth + 1} />
@@ -132,7 +129,7 @@ function DataView({ data }: DataViewProps) {
             <p className="data-view__xdr-note text-muted">
               Base64-encoded JSON (XDR decode requires server-side format=xdr support)
             </p>
-            <pre style={{ wordBreak: "break-all", whiteSpace: "pre-wrap" }}>
+            <pre className="ds-text-wrap-all">
               {xdrStr}
             </pre>
           </>
@@ -175,11 +172,11 @@ function RelatedEvents({ txHash, currentEventId, onSelect }: RelatedEventsProps)
   const others = (data ?? []).filter((e) => e.id !== currentEventId);
 
   if (isLoading)
-    return <p className="text-muted" style={{ fontSize: "0.8125rem" }}>Loading related events…</p>;
+    return <p className="text-muted ds-text-sm">Loading related events…</p>;
   if (isError)
-    return <p className="text-muted" style={{ fontSize: "0.8125rem" }}>Could not load related events.</p>;
+    return <p className="text-muted ds-text-sm">Could not load related events.</p>;
   if (others.length === 0)
-    return <p className="text-muted" style={{ fontSize: "0.8125rem" }}>No other events in this transaction.</p>;
+    return <p className="text-muted ds-text-sm">No other events in this transaction.</p>;
 
   return (
     <ul className="related-list">
@@ -334,7 +331,7 @@ export function EventDetailDrawer({
               <button
                 className="drawer-field__value mono"
                 onClick={() => navigate(`/contracts/${event.contract_id}`)}
-                style={{ cursor: "pointer", textDecoration: "underline" }}
+                className="ds-link-button"
               >
                 {event.contract_id}
               </button>
@@ -349,7 +346,7 @@ export function EventDetailDrawer({
 
             <div className="drawer-field drawer-field--links">
               <span className="drawer-field__label">View on</span>
-              <div className="drawer-field__value" style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+              <div className="drawer-field__value ds-row">
                 <ExternalLink
                   href={`${stellarExpertBase}/tx/${event.tx_hash}`}
                 >

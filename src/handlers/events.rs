@@ -2155,6 +2155,15 @@ pub async fn export_events(
         )));
     }
 
+    // Issue #1349: never silently fall back to CSV when Parquet was requested
+    // on a build without the `parquet` feature.
+    #[cfg(not(feature = "parquet"))]
+    if want_parquet {
+        return Err(AppError::Validation(
+            "format 'parquet' is not available: server built without the `parquet` feature".to_string(),
+        ));
+    }
+
     // Compression support
     let accept_encoding = headers.get(axum::http::header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -2329,7 +2338,7 @@ pub async fn export_events(
         }
         let mut builder = Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_TYPE, crate::parquet_export::PARQUET_CONTENT_TYPE)
             .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename))
             .header("Content-Range", content_range);
         if let Some(enc) = content_encoding {

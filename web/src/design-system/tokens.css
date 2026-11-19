@@ -1,0 +1,96 @@
+/*
+ * SorobanPulse design tokens (issue #1352).
+ * Every colour, space and type value used by the dashboard comes from here.
+ * Light palette on :root; dark palette via [data-theme='dark'] (set by ThemeContext).
+ */
+:root {
+  /* Colour — surfaces */
+  --sp-color-bg-canvas: #f6f7f9;
+  --sp-color-bg-surface: #ffffff;
+  --sp-color-bg-subtle: #eef0f3;
+  --sp-color-bg-overlay: rgba(15, 23, 42, 0.45);
+  /* Colour — text */
+  --sp-color-text-primary: #0f172a;
+  --sp-color-text-secondary: #475569;
+  --sp-color-text-muted: #64748b;
+  --sp-color-text-inverse: #ffffff;
+  /* Colour — borders */
+  --sp-color-border-default: #d9dee5;
+  --sp-color-border-strong: #b6bec9;
+  /* Colour — intent */
+  --sp-color-accent: #4f46e5;
+  --sp-color-accent-hover: #4338ca;
+  --sp-color-success: #15803d;
+  --sp-color-success-bg: #dcfce7;
+  --sp-color-warning: #b45309;
+  --sp-color-warning-bg: #fef3c7;
+  --sp-color-danger: #dc2626;
+  --sp-color-danger-hover: #b91c1c;
+  --sp-color-danger-bg: #fee2e2;
+  --sp-color-info: #0369a1;
+  --sp-color-info-bg: #e0f2fe;
+
+  /* Spacing (4px scale) */
+  --sp-space-0: 0;
+  --sp-space-1: 0.25rem;
+  --sp-space-2: 0.5rem;
+  --sp-space-3: 0.75rem;
+  --sp-space-4: 1rem;
+  --sp-space-6: 1.5rem;
+  --sp-space-8: 2rem;
+  --sp-space-12: 3rem;
+  --sp-space-16: 4rem;
+
+  /* Typography */
+  --sp-font-family-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --sp-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sp-font-size-xs: 0.75rem;
+  --sp-font-size-sm: 0.8125rem;
+  --sp-font-size-md: 0.9375rem;
+  --sp-font-size-lg: 1.125rem;
+  --sp-font-size-xl: 1.25rem;
+  --sp-font-size-2xl: 1.5rem;
+  --sp-font-weight-regular: 400;
+  --sp-font-weight-medium: 500;
+  --sp-font-weight-semibold: 600;
+  --sp-font-weight-bold: 700;
+  --sp-line-height-tight: 1.25;
+  --sp-line-height-normal: 1.5;
+
+  /* Shape, elevation, layout */
+  --sp-radius-sm: 4px;
+  --sp-radius-md: 8px;
+  --sp-radius-full: 9999px;
+  --sp-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --sp-shadow-lg: 0 10px 30px rgba(15, 23, 42, 0.18);
+  --sp-size-content-max: 1200px;
+  --sp-size-drawer: 28rem;
+  --sp-z-sticky: 10;
+  --sp-z-overlay: 100;
+  --sp-duration-fast: 120ms;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --sp-color-bg-canvas: #0b0f17;
+  --sp-color-bg-surface: #131a24;
+  --sp-color-bg-subtle: #1c2532;
+  --sp-color-bg-overlay: rgba(0, 0, 0, 0.6);
+  --sp-color-text-primary: #e6eaf0;
+  --sp-color-text-secondary: #b3bdcb;
+  --sp-color-text-muted: #8a96a8;
+  --sp-color-border-default: #2a3442;
+  --sp-color-border-strong: #3b4757;
+  --sp-color-accent: #818cf8;
+  --sp-color-accent-hover: #a5b4fc;
+  --sp-color-success: #4ade80;
+  --sp-color-success-bg: #14321f;
+  --sp-color-warning: #fbbf24;
+  --sp-color-warning-bg: #3a2a0c;
+  --sp-color-danger: #f87171;
+  --sp-color-danger-hover: #fca5a5;
+  --sp-color-danger-bg: #3b1515;
+  --sp-color-info: #38bdf8;
+  --sp-color-info-bg: #0c2a3b;
+  --sp-shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
+}

@@ -77,10 +77,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Issue #1247: parse + validate the configuration exactly once. Every
     // parse and semantic error is reported together in `ConfigError`.
-    let config = config::ConfigBuilder::from_env().build().inspect_err(|e| {
+    let mut config = config::ConfigBuilder::from_env().build().inspect_err(|e| {
         error!("{e}");
         eprintln!("Startup aborted due to configuration errors. Fix the above and restart.");
     })?;
+
+    // Issue #1351: route this replica to the nearest RPC endpoint when
+    // STELLAR_RPC_REGION_MAP is configured; otherwise keep STELLAR_RPC_URL.
+    let rpc_selection = soroban_pulse::rpc_region::resolve_from_env(&config.stellar_rpc_url);
+    if rpc_selection.from_region_map {
+        info!(region = %rpc_selection.region, rpc_url = %rpc_selection.url, "Selected region-specific RPC endpoint");
+        config.stellar_rpc_url = rpc_selection.url;
+    }
 
     info!(
         rpc_url = %config.stellar_rpc_url,
