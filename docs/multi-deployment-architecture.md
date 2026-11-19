@@ -634,3 +634,30 @@ of both pods during node maintenance.
   rules on all pods regardless of role.
 - The `ROLE` variable is set automatically by the Helm chart when
   `splitMode: true`; do not set it manually in `env`.
+
+## Region-Aware RPC Endpoint Selection (#1351)
+
+Multi-region deployments can route each indexer replica to the geographically
+nearest Stellar RPC endpoint.
+
+| Variable | Description |
+|----------|-------------|
+| `STELLAR_RPC_REGION_MAP` | JSON object mapping region → RPC URL, e.g. `{"us-east-1":"https://rpc-us.example.com","fra":"https://rpc-eu.example.com"}` |
+| `FLY_REGION` | Region detected on Fly.io (takes priority) |
+| `AWS_DEFAULT_REGION` | Region detected on AWS when `FLY_REGION` is unset |
+
+At startup the replica reads `FLY_REGION`, then `AWS_DEFAULT_REGION`. If the
+detected region is a key in `STELLAR_RPC_REGION_MAP`, that URL replaces
+`STELLAR_RPC_URL`. In every other case — no map, invalid JSON (a warning is
+logged), unknown region, or a region missing from the map — `STELLAR_RPC_URL`
+is used unchanged.
+
+The selection is exported as an info metric:
+
+```
+soroban_pulse_rpc_region{region="us-east-1",source="region_map"} 1
+```
+
+`source` is `region_map` when the URL came from the map and `default` when the
+replica fell back to `STELLAR_RPC_URL`; `region` is `unknown` when no region
+env var is set.

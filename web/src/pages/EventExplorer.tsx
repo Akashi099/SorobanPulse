@@ -115,10 +115,10 @@ function EventExplorer() {
   )
 
   return (
-    <div style={{ padding: '2rem' }}>
+    <div className="ds-page">
       <h1>Event Explorer</h1>
 
-      <div className="filters" style={{ margin: '1rem 0' }}>
+      <div className="filters ds-my-4">
         <input
           type="text"
           placeholder="Contract ID"
@@ -146,7 +146,7 @@ function EventExplorer() {
       </div>
 
       {loading && <p>Loading...</p>}
-      {error && <p style={{ color: '#ef4444' }}>Error: {error}</p>}
+      {error && <p className="ds-text-danger">Error: {error}</p>}
       {!loading && !error && events.length === 0 && <p>No events found</p>}
 
       {sortedEvents.length > 0 && (
@@ -176,9 +176,7 @@ function EventExplorer() {
               {sortedEvents.map((event, idx) => (
                 <tr
                   key={event.id}
-                  style={{
-                    backgroundColor: idx === selectedRow ? 'var(--table-header-hover)' : 'transparent',
-                  }}
+                  className={idx === selectedRow ? 'ds-row-selected' : undefined}
                 >
                   <td>{event.id.substring(0, 8)}...</td>
                   <td>{event.contract_id.substring(0, 12)}...</td>

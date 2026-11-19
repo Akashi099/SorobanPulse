@@ -544,6 +544,38 @@ subscription OnNewEvents {
 }
 ```
 
+### WebSocket endpoint (#1350)
+
+| | |
+|---|---|
+| URL | `GET /graphql/ws` (WebSocket upgrade) |
+| Feature flag | build with `--features graphql` |
+| Sub-protocols | `graphql-transport-ws` (default, used by `graphql-ws`) and legacy `graphql-ws` (`subscriptions-transport-ws`) |
+| Idle timeout | 300 s without server traffic closes the socket |
+| Keep-alive | server ping every 30 s |
+
+Events are pushed from the same broadcast channel that feeds REST SSE
+(`/v1/events/stream`), so GraphQL and SSE clients see the same events.
+
+Filter by contract with the `contractId` argument (shorthand for
+`filter: { contractId: ... }`; when both are given, both must match):
+
+```graphql
+subscription {
+  events(contractId: "CABC...") {
+    id
+    contractId
+    eventType
+    ledger
+    txHash
+  }
+}
+```
+
+Each connection holds one broadcast subscription, created on
+`connection_init` and dropped as soon as the WebSocket closes, so
+disconnected clients never accumulate lagging receivers.
+
 ### JavaScript WebSocket Example
 
 ```typescript

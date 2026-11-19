@@ -1019,7 +1019,19 @@ pub fn create_router_with_tx_and_tenant_map(
 
 /// Issue #683: GraphQL API routes (requires `graphql` feature)
 fn graphql_routes() -> Router<AppState> {
-    Router::new()
+    #[cfg(feature = "graphql")]
+    {
+        // Issue #1350: GraphQL subscriptions over WebSocket (graphql-ws /
+        // graphql-transport-ws protocols).
+        Router::new().route(
+            "/graphql/ws",
+            get(crate::graphql_subscriptions::handle_graphql_ws),
+        )
+    }
+    #[cfg(not(feature = "graphql"))]
+    {
+        Router::new()
+    }
 }
 
 fn build_cors(allowed_origins: &[String]) -> CorsLayer {

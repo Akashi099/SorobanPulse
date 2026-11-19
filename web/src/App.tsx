@@ -20,45 +20,19 @@ function App() {
   }, [])
 
   return (
-    <div style={{ fontFamily: 'system-ui, sans-serif', minHeight: '100vh' }}>
-      <nav
-        style={{
-          padding: '1rem',
-          borderBottom: '1px solid var(--border-color)',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-        }}
-      >
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flex: 1 }}>
+    <div className="app-shell">
+      <nav className="app-nav">
+        <div className="ds-row ds-row--lg ds-spacer">
           {isMobile ? (
             <>
               <button
                 onClick={() => setMenuOpen(!menuOpen)}
-                style={{
-                  padding: '0.25rem 0.5rem',
-                  fontSize: '1.5rem',
-                  minWidth: '44px',
-                  minHeight: '44px',
-                }}
+                className="app-nav__menu-button"
               >
                 ☰
               </button>
               {menuOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: '60px',
-                    left: 0,
-                    right: 0,
-                    backgroundColor: 'var(--bg-color)',
-                    borderBottom: '1px solid var(--border-color)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    padding: '1rem',
-                  }}
-                >
+                <div className="app-nav__menu">
                   <Link to="/" onClick={() => setMenuOpen(false)}>
                     Event Explorer
                   </Link>
@@ -85,11 +59,7 @@ function App() {
         </div>
         <button
           onClick={toggleTheme}
-          style={{
-            padding: '0.5rem 0.75rem',
-            minWidth: '44px',
-            minHeight: '44px',
-          }}
+          className="app-nav__theme-button"
           title="Toggle theme"
         >
           {theme === 'light' ? '🌙' : '☀️'}

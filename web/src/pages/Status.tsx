@@ -13,27 +13,29 @@ interface MetricsData {
   sse_connections: number
 }
 
-function getStatusColor(metric: 'lag' | 'pool' | 'rpc', value: number): string {
+type StatusTone = 'success' | 'warning' | 'danger'
+
+function getStatusColor(metric: 'lag' | 'pool' | 'rpc', value: number): StatusTone {
   switch (metric) {
     case 'lag':
-      if (value < 10) return '#22c55e'
-      if (value < 30) return '#eab308'
-      return '#ef4444'
+      if (value < 10) return 'success'
+      if (value < 30) return 'warning'
+      return 'danger'
     case 'pool':
-      if (value < 0.7) return '#22c55e'
-      if (value < 0.9) return '#eab308'
-      return '#ef4444'
+      if (value < 0.7) return 'success'
+      if (value < 0.9) return 'warning'
+      return 'danger'
     case 'rpc':
-      if (value < 0.01) return '#22c55e'
-      if (value < 0.05) return '#eab308'
-      return '#ef4444'
+      if (value < 0.01) return 'success'
+      if (value < 0.05) return 'warning'
+      return 'danger'
   }
 }
 
-function StatusIndicator({ color, label, value }: { color: string; label: string; value: string }) {
+function StatusIndicator({ color, label, value }: { color: StatusTone; label: string; value: string }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-      <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: color }} />
+    <div className="ds-row ds-mb-4">
+      <div className={`ds-status-dot ds-status-dot--${color}`} />
       <span>{label}: {value}</span>
     </div>
   )
@@ -85,8 +87,8 @@ export default function Status() {
     return () => clearInterval(interval)
   }, [])
 
-  if (loading) return <div style={{ padding: '2rem' }}>Loading status...</div>
-  if (error) return <div style={{ padding: '2rem', color: '#ef4444' }}>Error: {error}</div>
+  if (loading) return <div className="ds-page">Loading status...</div>
+  if (error) return <div className="ds-page ds-text-danger">Error: {error}</div>
 
   const poolUtilization = metrics ? (metrics.pool_used / metrics.pool_max) : 0
   const lagColor = health ? getStatusColor('lag', health.lag) : '#ccc'
@@ -94,14 +96,14 @@ export default function Status() {
   const rpcColor = metrics ? getStatusColor('rpc', metrics.rpc_error_rate) : '#ccc'
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '800px' }}>
+    <div className="ds-page ds-page--medium">
       <h1>System Status</h1>
-      <div style={{ marginTop: '2rem' }}>
+      <div className="ds-mt-8">
         <h2>Indexer Health</h2>
         {health && (
           <>
             <StatusIndicator
-              color={health.ready ? '#22c55e' : '#ef4444'}
+              color={health.ready ? 'success' : 'danger'}
               label="Status"
               value={health.ready ? 'Ready' : 'Not Ready'}
             />
@@ -111,7 +113,7 @@ export default function Status() {
         )}
       </div>
 
-      <div style={{ marginTop: '2rem' }}>
+      <div className="ds-mt-8">
         <h2>Database</h2>
         {metrics && (
           <StatusIndicator
@@ -122,7 +124,7 @@ export default function Status() {
         )}
       </div>
 
-      <div style={{ marginTop: '2rem' }}>
+      <div className="ds-mt-8">
         <h2>RPC</h2>
         {metrics && (
           <>
@@ -131,7 +133,7 @@ export default function Status() {
               label="Error Rate (5min)"
               value={`${(metrics.rpc_error_rate * 100).toFixed(2)}%`}
             />
-            <StatusIndicator color="#22c55e" label="SSE Connections" value={metrics.sse_connections.toString()} />
+            <StatusIndicator color="success" label="SSE Connections" value={metrics.sse_connections.toString()} />
           </>
         )}
       </div>

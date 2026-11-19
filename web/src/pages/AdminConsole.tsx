@@ -141,7 +141,7 @@ export default function AdminConsole() {
 
   if (!isAuthed) {
     return (
-      <div style={{ padding: '2rem', maxWidth: '400px', margin: '0 auto' }}>
+      <div className="ds-page ds-page--narrow">
         <h1>Admin Console</h1>
         <form onSubmit={handleAuth}>
           <input
@@ -149,10 +149,10 @@ export default function AdminConsole() {
             placeholder="Admin Key"
             value={adminKey}
             onChange={e => setAdminKey(e.target.value)}
-            style={{ width: '100%', marginBottom: '1rem' }}
+            className="ds-w-full ds-mb-4"
             required
           />
-          <button type="submit" style={{ width: '100%' }}>
+          <button type="submit" className="ds-button ds-button--primary ds-button--block">
             Authenticate
           </button>
         </form>
@@ -161,24 +161,16 @@ export default function AdminConsole() {
   }
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '1000px' }}>
+    <div className="ds-page ds-page--wide">
       <h1>Admin Console</h1>
 
       {message && (
-        <div
-          style={{
-            padding: '1rem',
-            marginBottom: '1rem',
-            backgroundColor: message.type === 'error' ? '#fee2e2' : '#dcfce7',
-            color: message.type === 'error' ? '#991b1b' : '#166534',
-            borderRadius: '4px',
-          }}
-        >
+        <div className={`ds-alert ds-alert--${message.type === 'error' ? 'danger' : 'success'}`}>
           {message.text}
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem', marginTop: '2rem' }}>
+      <div className="ds-grid-2 ds-mt-8">
         <div>
           <h2>Indexer Control</h2>
           {health && (
@@ -186,7 +178,7 @@ export default function AdminConsole() {
               <p>Status: <strong>{health.paused ? 'Paused' : health.running ? 'Running' : 'Stopped'}</strong></p>
               <p>Role: <strong>{health.leader ? 'Leader' : 'Standby'}</strong></p>
               <p>Replicas: <strong>{health.replicas}</strong></p>
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+              <div className="ds-row ds-mt-4">
                 <button onClick={handlePause} disabled={loading || health.paused}>
                   Pause
                 </button>
@@ -206,7 +198,7 @@ export default function AdminConsole() {
               placeholder="From Ledger"
               value={replayFrom}
               onChange={e => setReplayFrom(e.target.value)}
-              style={{ width: '100%', marginBottom: '0.5rem' }}
+              className="ds-w-full ds-mb-2"
               required
             />
             <input
@@ -214,19 +206,19 @@ export default function AdminConsole() {
               placeholder="To Ledger"
               value={replayTo}
               onChange={e => setReplayTo(e.target.value)}
-              style={{ width: '100%', marginBottom: '0.5rem' }}
+              className="ds-w-full ds-mb-2"
               required
             />
-            <label style={{ display: 'flex', alignItems: 'center', marginBottom: '1rem' }}>
+            <label className="ds-row ds-mb-4">
               <input
                 type="checkbox"
                 checked={dryRun}
                 onChange={e => setDryRun(e.target.checked)}
-                style={{ marginRight: '0.5rem' }}
+                
               />
               Dry Run
             </label>
-            <button type="submit" disabled={loading} style={{ width: '100%' }}>
+            <button type="submit" disabled={loading} className="ds-button ds-button--primary ds-button--block">
               Trigger Replay
             </button>
           </form>
@@ -234,12 +226,12 @@ export default function AdminConsole() {
       </div>
 
       {lagData.length > 0 && (
-        <div style={{ marginTop: '2rem' }}>
+        <div className="ds-mt-8">
           <h2>Lag Time Series (last 5 min)</h2>
           <svg
             width="100%"
             height="200"
-            style={{ border: '1px solid #ddd', borderRadius: '4px', marginTop: '1rem' }}
+            className="ds-bordered ds-mt-4"
           >
             {lagData.map((point, i) => {
               const x = (i / lagData.length) * 100

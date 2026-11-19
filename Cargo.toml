@@ -77,6 +77,11 @@ async-graphql-actix-web = "7.0"
 # WebSocket
 tokio-tungstenite = "0.21"
 
+# Issue #1349: Parquet event export (enabled by the `parquet` feature)
+parquet = { version = "53", default-features = false, features = ["arrow", "snap"], optional = true }
+arrow-array = { version = "53", optional = true }
+arrow-schema = { version = "53", optional = true }
+
 # Utilities
 bytes = "1.5"
 base64 = "0.21"
@@ -150,6 +155,12 @@ full-observability = ["tracing-opentelemetry", "opentelemetry-jaeger"]
 kafka = ["dep:rdkafka"]
 sqs = []
 pubsub = ["dep:google-cloud-pubsub", "dep:google-cloud-googleapis"]
+
+# Issue #1349: Parquet export via GET /v1/events/export?format=parquet
+parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
+
+# Issue #1350: GraphQL API, including subscriptions over WebSocket at /graphql/ws
+graphql = []
 
 # Chaos testing (gates tests/chaos_tests.rs advisory-lock failover tests)
 chaos = []

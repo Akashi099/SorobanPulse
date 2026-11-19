@@ -19,6 +19,12 @@ use std::io::Cursor;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// IANA media type for Parquet files (issue #1349).
+pub const PARQUET_CONTENT_TYPE: &str = "application/vnd.apache.parquet";
+
+/// One exported event. Mirrors the columns of the `events` table / `Event`
+/// model; timestamps are stored as microseconds since the Unix epoch and
+/// `event_data` as its JSON string.
 pub struct EventRow {
     pub id: Uuid,
     pub contract_id: String,
@@ -196,5 +202,64 @@ impl StreamingParquetWriter {
     pub fn finish(mut self) -> Result<Vec<u8>, parquet::errors::ParquetError> {
         self.writer.close()?;
         Ok(self.writer.into_inner().into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    fn sample(n: i64) -> EventRow {
+        EventRow {
+            id: Uuid::new_v4(),
+            contract_id: format!("CABC{n}"),
+            event_type: "contract".into(),
+            tx_hash: format!("hash{n}"),
+            ledger: 1000 + n,
+            timestamp: Utc::now(),
+            event_data: serde_json::json!({ "n": n }),
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Issue #1349: a written file reads back with the `parquet` crate.
+    #[test]
+    fn parquet_round_trip() {
+        let rows: Vec<EventRow> = (0..5).map(sample).collect();
+        let bytes = write_events_parquet(&rows).expect("write parquet");
+        assert_eq!(&bytes[..4], b"PAR1", "missing Parquet magic header");
+
+        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes)).expect("read parquet");
+        let meta = reader.metadata();
+        assert_eq!(meta.file_metadata().num_rows(), 5);
+        let cols: Vec<String> = meta
+            .file_metadata()
+            .schema_descr()
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        assert_eq!(
+            cols,
+            ["id", "contract_id", "event_type", "tx_hash", "ledger", "timestamp_us", "event_data", "created_at_us"]
+        );
+
+        let ledgers: Vec<i64> = reader
+            .get_row_iter(None)
+            .unwrap()
+            .map(|r| r.unwrap().get_long(4).unwrap())
+            .collect();
+        assert_eq!(ledgers, vec![1000, 1001, 1002, 1003, 1004]);
+    }
+
+    #[test]
+    fn streaming_writer_round_trip() {
+        let mut w = create_streaming_writer(2).unwrap();
+        w.write_batch(&[sample(1), sample(2)]).unwrap();
+        w.write_batch(&[sample(3)]).unwrap();
+        let bytes = w.finish().unwrap();
+        let reader = SerializedFileReader::new(bytes::Bytes::from(bytes)).unwrap();
+        assert_eq!(reader.metadata().file_metadata().num_rows(), 3);
     }
 }

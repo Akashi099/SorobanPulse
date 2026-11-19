@@ -1,4 +1,5 @@
 import { useStatus, useEvents, useContracts } from "../api/hooks.ts";
+import { cx, type CardAccent } from "../design-system";
 
 /**
  * Landing dashboard — high-level metrics and a recent events preview.
@@ -16,14 +17,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Stat cards */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-          gap: "1rem",
-          marginBottom: "1.5rem",
-        }}
-      >
+      <div className="ds-stat-grid ds-mb-6">
         <StatCard
           label="Indexer"
           value={
@@ -34,7 +28,7 @@ export default function OverviewPage() {
           sub={
             status.data ? `Ledger ${status.data.latest_ledger.toLocaleString()}` : ""
           }
-          accent={status.data?.indexing ? "var(--color-success)" : "var(--color-error)"}
+          accent={status.data?.indexing ? "success" : "danger"}
         />
         <StatCard
           label="Contracts indexed"
@@ -48,7 +42,7 @@ export default function OverviewPage() {
 
       {/* Recent events preview */}
       <div className="card">
-        <h2 style={{ fontSize: "0.9375rem", marginBottom: "0.75rem" }}>Recent Events</h2>
+        <h2 className="ds-text-md ds-mb-3">Recent Events</h2>
         {events.isLoading && <p className="text-muted">Loading…</p>}
         {events.isError && (
           <div className="error-banner">⚠ Failed to load events</div>
@@ -101,15 +95,15 @@ function StatCard({
   label: string;
   value: string;
   sub?: string;
-  accent?: string;
+  accent?: CardAccent;
 }) {
   return (
-    <div className="card" style={{ borderTop: accent ? `3px solid ${accent}` : undefined }}>
-      <p className="text-muted" style={{ fontSize: "0.75rem", marginBottom: "0.25rem" }}>
+    <div className={cx("card", "ds-card", accent && `ds-card--accent-${accent}`)}>
+      <p className="text-muted ds-text-xs ds-mb-1">
         {label}
       </p>
-      <p style={{ fontSize: "1.5rem", fontWeight: 700 }}>{value}</p>
-      {sub && <p className="text-muted" style={{ fontSize: "0.75rem" }}>{sub}</p>}
+      <p className="ds-text-2xl ds-font-bold">{value}</p>
+      {sub && <p className="text-muted ds-text-xs">{sub}</p>}
     </div>
   );
 }

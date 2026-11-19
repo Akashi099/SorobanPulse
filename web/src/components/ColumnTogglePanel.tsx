@@ -54,7 +54,7 @@ export function ColumnTogglePanel({ columns, hiddenCols, onToggle }: Props) {
   }, [open]);
 
   return (
-    <div className="col-toggle-wrap" style={{ position: "relative" }}>
+    <div className="col-toggle-wrap ds-relative">
       <button
         ref={btnRef}
         className="btn col-toggle-btn"

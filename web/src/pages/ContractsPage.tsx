@@ -35,7 +35,7 @@ export default function ContractsPage() {
                 <tbody>
                   {data.data.length === 0 ? (
                     <tr>
-                      <td colSpan={2} style={{ textAlign: "center", padding: "2rem" }}>
+                      <td colSpan={2} className="ds-table__empty">
                         <span className="text-muted">No contracts indexed yet.</span>
                       </td>
                     </tr>

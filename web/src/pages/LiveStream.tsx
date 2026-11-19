@@ -92,34 +92,27 @@ function LiveStream() {
   }
 
   return (
-    <div style={{ padding: '2rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div className="ds-page">
+      <div className="ds-row ds-row--between">
         <h1>Live Event Stream</h1>
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+        <div className="ds-row ds-row--lg">
           <span>
             {eventsPerSecond} events/s | {events.length} total
           </span>
           <button onClick={togglePause}>{isPaused ? 'Resume' : 'Pause'}</button>
-          <span
-            style={{
-              width: '10px',
-              height: '10px',
-              borderRadius: '50%',
-              backgroundColor: isConnected ? '#4caf50' : '#f44336',
-            }}
-          />
+          <span className={`ds-status-dot ds-status-dot--${isConnected ? 'success' : 'danger'}`} />
         </div>
       </div>
 
-      {error && <p style={{ color: 'red', marginTop: '1rem' }}>Error: {error}</p>}
+      {error && <p className="ds-text-danger ds-mt-4">Error: {error}</p>}
 
       {isPaused && pausedEventsRef.current.length > 0 && (
-        <p style={{ marginTop: '1rem', color: '#ff9800' }}>
+        <p className="ds-text-warning ds-mt-4">
           {pausedEventsRef.current.length} events buffered
         </p>
       )}
 
-      <div style={{ marginTop: '1rem' }}>
+      <div className="ds-mt-4">
         {events.length === 0 ? (
           <p>Waiting for events...</p>
         ) : (
