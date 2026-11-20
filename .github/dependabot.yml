@@ -21,6 +21,8 @@ updates:
   # Keep GitHub Actions pinned SHAs current.
   # Dependabot will open PRs to update the SHA comment and the pinned hash
   # whenever an action cuts a new release, so pins never go stale.
+  # Grouping is intentionally left ungrouped so each action SHA bump lands in
+  # its own PR, making review of the pinned hash straightforward.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -30,3 +32,13 @@ updates:
       - "ci"
     commit-message:
       prefix: "ci"
+    open-pull-requests-limit: 20
+    groups:
+      # Batch routine patch/minor SHA bumps together to reduce PR noise while
+      # still keeping every action pinned to a full commit SHA.
+      github-actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

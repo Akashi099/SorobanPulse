@@ -35,8 +35,8 @@ jobs:
       web: ${{ steps.filter.outputs.web }}
       extension: ${{ steps.filter.outputs.extension }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
         id: filter
         with:
           filters: |
@@ -84,26 +84,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
         with:
           tool: cargo-machete
       - run: cargo machete
 
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "deny.toml"]'), github.event.pull_request.changed_files)
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # Single invocation so advisories, bans, licenses and sources are all
-      # enforced against the repo's deny.toml (GPL/AGPL denied, unmaintained
-      # and vulnerability advisories denied).
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
-        with:
-          command: check all
-          arguments: --all-features --config deny.toml
+  # Security auditing (cargo-deny / advisories) lives in security.yml; the
+  # Helm chart lint lives in helm.yml. Keeping them out of this workflow avoids
+  # duplicate runs on the same commit.
 
   check-migrations:
     name: Check Migrations
@@ -136,7 +124,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
         with:
           tool: sqlx-cli
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
@@ -181,8 +169,8 @@ jobs:
       run:
         working-directory: dashboard
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
       - run: npm install
@@ -198,8 +186,8 @@ jobs:
       run:
         working-directory: vscode-extension
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: npm
@@ -256,7 +244,9 @@ jobs:
           key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
           restore-keys: ${{ runner.os }}-sqlx-
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
       - name: Run sqlx prepare check
         run: cargo sqlx prepare --check
       - name: Build test archive
@@ -301,9 +291,11 @@ jobs:
           key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
           restore-keys: ${{ runner.os }}-sqlx-
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
       - run: cargo nextest archive --archive-file nextest-archive.tar.zst
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nextest-archive
           path: nextest-archive.tar.zst
@@ -332,13 +324,13 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: features
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
         with:
           tool: cargo-hack,sqlx-cli
       # cmake builds librdkafka for the `kafka` feature (rdkafka `cmake-build`).
@@ -400,9 +392,11 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-archive
       - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci
@@ -443,24 +437,26 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@beta
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # beta
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: beta-pg${{ matrix.postgres }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .sqlx
           key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
           restore-keys: ${{ runner.os }}-sqlx-
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
       - run: cargo nextest run --profile ci
         env:
           PROPTEST_CASES: 50000
       - name: Publish test report
         if: always()
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c # v5
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: Test report (rust beta, pg ${{ matrix.postgres }})
@@ -500,7 +496,7 @@ jobs:
       - name: Write coverage summary
         run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: lcov.info
@@ -515,22 +511,24 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-archive
       - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci -E 'binary(pact_contract_tests)'
       - name: Publish test report
         if: always()
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c # v5
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: Contract test report
           annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       - name: Upload contract tests report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: contract-tests-report
           path: target/nextest/ci/junit.xml
@@ -573,9 +571,11 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-archive
       - name: Run ${{ matrix.name }}
@@ -586,7 +586,7 @@ jobs:
         run: cargo test --features ${{ matrix.features }} --test ${{ matrix.binary }}
       - name: Publish test report
         if: always()
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c # v5
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: ${{ matrix.name }} report
@@ -624,16 +624,18 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-archive
       - name: Run multi-tenant isolation tests
         run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci -E 'binary(multi_tenant_isolation_tests)'
       - name: Publish test report
         if: always()
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c # v5
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: Multi-Tenant RLS Isolation report (pg ${{ matrix.postgres }})
@@ -711,9 +713,9 @@ jobs:
     name: Check Env Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Verify docs/configuration.md is in sync with src/config.rs
@@ -723,7 +725,7 @@ jobs:
     name: Check mdBook Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install mdbook
         run: |
           mkdir -p ~/.local/bin
@@ -817,27 +819,14 @@ jobs:
           kubectl get networkpolicy -n soroban-pulse -o jsonpath='{.items[*].spec.egress}' | grep -q 443
           kubectl get networkpolicy -n soroban-pulse -o jsonpath='{.items[*].spec.egress}' | grep -q 53
 
-  helm-lint:
-    name: Helm Chart Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
-        with:
-          version: "3.14.0"
-      - name: Lint Helm chart
-        run: helm lint helm/soroban-pulse
-      - name: Render template (default values)
-        run: helm template soroban-pulse helm/soroban-pulse | grep -v "DATABASE_URL\|API_KEY\|SMTP_PASSWORD"
-      - name: Render template (existingSecret)
-        run: helm template soroban-pulse helm/soroban-pulse --set existingSecret=my-secret
+  # Helm chart lint/render is covered by helm.yml.
 
   check-api-types:
     name: Dashboard API types up to date
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
@@ -928,6 +917,19 @@ jobs:
       - name: TFLint
         run: tflint --init && tflint --recursive
 
+  action-pinning:
+    name: Actions pinned to SHAs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinact
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/suzuki-shunsuke/pinact/main/install.sh \
+            | bash -s -- -b "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Fail on tag-only action references
+        run: pinact run --check .github/workflows
+
   # Mandatory check job that always runs to keep branch protection happy
   ci-success:
     name: CI Success
@@ -936,8 +938,8 @@ jobs:
     needs:
       - fmt
       - workflow-lint
+      - action-pinning
       - machete
-      - deny
       - check-migrations
       - migration-roundtrip
       - validate-sdk
@@ -959,7 +961,6 @@ jobs:
       - build
       - docker
       - network-policy
-      - helm-lint
       - check-api-types
       - openapi
       - config-docs
