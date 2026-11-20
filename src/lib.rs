@@ -79,6 +79,7 @@ pub mod normalizer;
 pub mod observability;
 pub mod notification_dedup;
 pub mod notification_formatter;
+pub mod notification_pipeline;
 pub mod pagerduty;
 pub mod pruner;
 pub mod profiling;
