@@ -763,6 +763,49 @@ jobs:
         run: brew install pkg-config openssl@3
       - run: cargo build --release
 
+  docker-pr:
+    name: Docker Build & Trivy Scan (PR)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: soroban-pulse:pr
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@6c175e9c4083a92bbca2f9724c8a5e33bc2d97a5 # 0.30.0
+        with:
+          image-ref: soroban-pulse:pr
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+      - name: Enforce image size limit (80 MB)
+        run: |
+          size=$(docker image inspect --format '{{.Size}}' soroban-pulse:pr)
+          limit=83886080
+          echo "Image size: ${size} bytes (limit: ${limit} bytes)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt "$limit" ]; then
+            echo "::error::Docker image is $((size / 1024 / 1024)) MB, exceeding the 80 MB limit"
+            exit 1
+          fi
+
   docker:
     name: Docker Build (validate)
     runs-on: ubuntu-latest
@@ -957,6 +1000,7 @@ jobs:
       - mutants
       - fuzz
       - build
+      - docker-pr
       - docker
       - network-policy
       - helm-lint
