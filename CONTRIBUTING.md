@@ -310,6 +310,18 @@ Not:
 20260527000000_add_webhook_failures_table.sql  # ❌ Duplicate timestamp!
 ```
 
+### Safe Migrations
+
+The `events` table is large and partitioned. Some DDL blocks writes for the length of a table rewrite or a full scan. CI runs [squawk](https://github.com/sbdchd/squawk) on every new or changed up migration (the `migration-safety` job) and fails on the statements below.
+
+- **Indexes on existing tables:** use `CREATE INDEX CONCURRENTLY`. It cannot run inside a transaction, so put `-- no-transaction` on the first line of the migration. sqlx then runs it outside a transaction.
+- **Constraints:** add them with `NOT VALID` first, then run `ALTER TABLE ... VALIDATE CONSTRAINT ...` in a later migration. Validation takes a weaker lock and does not block writes.
+- **Backfills:** run large `UPDATE`s in batches outside the migration, not as one statement inside it.
+- **Column types:** avoid changing the type of an existing column on a large table. Add a new column, backfill it in batches, then switch reads and writes over.
+- **Defaults:** adding a column with a volatile default rewrites the table. Add the column first, then set the default in a separate statement.
+
+If squawk flags a reviewed statement that is safe in context, add `-- squawk-ignore <rule-name>` on the line above it and explain why in the PR description.
+
 ## Working with Compile-Time SQL (`sqlx` macros)
 
 Hot-path queries use `sqlx::query_scalar!` and `sqlx::query_as!` macros so that
