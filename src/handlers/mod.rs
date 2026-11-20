@@ -445,6 +445,25 @@ fn decode_cursor_tagged(cursor: &str) -> Result<(String, String, Uuid), AppError
     Ok((tag, value, id))
 }
 
+/// Encode a `created_at` keyset position. Microseconds keep the value free of `:`.
+fn encode_created_at_cursor(created_at: DateTime<Utc>, id: Uuid) -> String {
+    encode_cursor_tagged("created_at", &created_at.timestamp_micros().to_string(), id)
+}
+
+/// Decode a `created_at` keyset cursor back into its (created_at, id) position.
+fn decode_created_at_cursor(cursor: &str) -> Result<(DateTime<Utc>, Uuid), AppError> {
+    let (tag, value, id) = decode_cursor_tagged(cursor)?;
+    if tag != "created_at" {
+        return Err(AppError::Validation("invalid cursor".to_string()));
+    }
+    let micros: i64 = value
+        .parse()
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    let created_at = DateTime::<Utc>::from_timestamp_micros(micros)
+        .ok_or_else(|| AppError::Validation("invalid cursor".to_string()))?;
+    Ok((created_at, id))
+}
+
 /// Encode a (ledger, id) pair as an opaque URL-safe base64 cursor.
 fn encode_cursor(ledger: i64, id: Uuid) -> String {
     URL_SAFE_NO_PAD.encode(format!("{ledger}:{id}"))
@@ -10134,7 +10153,9 @@ pub async fn delete_anonymization_rule(
         ("from"          = Option<String>, Query, description = "ISO-8601 start datetime (inclusive)"),
         ("to"            = Option<String>, Query, description = "ISO-8601 end datetime (inclusive)"),
         ("limit"         = Option<i64>,    Query, description = "Max results to return (default 100, max 1000)"),
-        ("offset"        = Option<i64>,    Query, description = "Pagination offset"),
+        ("offset"        = Option<i64>,    Query, description = "Deprecated: use cursor"),
+        ("cursor"        = Option<String>, Query, description = "Opaque keyset cursor from next_cursor"),
+        ("include_total" = Option<bool>,   Query, description = "Include exact total (COUNT(*)), default false"),
     ),
     responses(
         (status = 200, description = "Audit log entries"),
@@ -10152,6 +10173,12 @@ pub async fn get_audit_logs(
     // Clamp limit
     let limit = params.limit.unwrap_or(100).clamp(1, 1000);
     let offset = params.offset.unwrap_or(0).max(0);
+    let include_total = params.include_total.unwrap_or(false);
+    let cursor_key: Option<(DateTime<Utc>, Uuid)> = params
+        .cursor
+        .as_deref()
+        .map(decode_created_at_cursor)
+        .transpose()?;
 
     // Parse optional datetime bounds
     let from_dt: Option<DateTime<Utc>> = params
@@ -10219,19 +10246,35 @@ pub async fn get_audit_logs(
         format!("WHERE {}", conditions.join(" AND "))
     };
 
-    // Count total matching rows
-    let count_sql = format!("SELECT COUNT(*) FROM audit_logs {where_clause}");
-    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    if let Some(ref v) = params.event_type    { count_q = count_q.bind(v); }
-    if let Some(ref v) = params.resource_type { count_q = count_q.bind(v); }
-    if let Some(ref v) = params.user_email    { count_q = count_q.bind(v); }
-    if let Some(ref v) = params.severity      { count_q = count_q.bind(v); }
-    if let Some(v)     = params.success       { count_q = count_q.bind(v); }
-    if let Some(v)     = from_dt              { count_q = count_q.bind(v); }
-    if let Some(v)     = to_dt               { count_q = count_q.bind(v); }
-    let total: i64 = count_q.fetch_one(&state.pool).await?;
+    // Count total matching rows only when requested (COUNT(*) is costly on large tables)
+    let total: Option<i64> = if include_total {
+        let count_sql = format!("SELECT COUNT(*) FROM audit_logs {where_clause}");
+        let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+        if let Some(ref v) = params.event_type    { count_q = count_q.bind(v); }
+        if let Some(ref v) = params.resource_type { count_q = count_q.bind(v); }
+        if let Some(ref v) = params.user_email    { count_q = count_q.bind(v); }
+        if let Some(ref v) = params.severity      { count_q = count_q.bind(v); }
+        if let Some(v)     = params.success       { count_q = count_q.bind(v); }
+        if let Some(v)     = from_dt              { count_q = count_q.bind(v); }
+        if let Some(v)     = to_dt                { count_q = count_q.bind(v); }
+        Some(count_q.fetch_one(&state.pool).await?)
+    } else {
+        None
+    };
 
-    // Fetch page
+    // Fetch page: keyset cursor when given, offset kept for existing clients
+    let mut data_conditions: Vec<String> = conditions.clone();
+    let mut data_idx: i32 = idx;
+    if cursor_key.is_some() {
+        data_conditions.push(format!("(created_at, id) < (${data_idx}, ${})", data_idx + 1));
+        data_idx += 2;
+    }
+    let data_where = if data_conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", data_conditions.join(" AND "))
+    };
+
     let data_sql = format!(
         "SELECT id, event_type, action, resource_type, resource_id, \
          resource_description, request_path, request_method, \
@@ -10239,10 +10282,10 @@ pub async fn get_audit_logs(
          changes, old_value, new_value, \
          status_code, success, error_message, \
          created_by, severity, created_at, expires_at \
-         FROM audit_logs {where_clause} \
-         ORDER BY created_at DESC \
-         LIMIT ${idx} OFFSET ${}",
-        idx + 1
+         FROM audit_logs {data_where} \
+         ORDER BY created_at DESC, id DESC \
+         LIMIT ${data_idx} OFFSET ${}",
+        data_idx + 1
     );
 
     let mut data_q = sqlx::query(&data_sql);
@@ -10252,10 +10295,21 @@ pub async fn get_audit_logs(
     if let Some(ref v) = params.severity      { data_q = data_q.bind(v); }
     if let Some(v)     = params.success       { data_q = data_q.bind(v); }
     if let Some(v)     = from_dt              { data_q = data_q.bind(v); }
-    if let Some(v)     = to_dt               { data_q = data_q.bind(v); }
+    if let Some(v)     = to_dt                { data_q = data_q.bind(v); }
+    if let Some((created_at, id)) = cursor_key { data_q = data_q.bind(created_at).bind(id); }
     data_q = data_q.bind(limit).bind(offset);
 
     let rows = data_q.fetch_all(&state.pool).await?;
+
+    let next_cursor: Option<String> = if rows.len() as i64 == limit {
+        rows.last().and_then(|row| {
+            let created_at = row.try_get::<DateTime<Utc>, _>("created_at").ok()?;
+            let id = row.try_get::<Uuid, _>("id").ok()?;
+            Some(encode_created_at_cursor(created_at, id))
+        })
+    } else {
+        None
+    };
 
     let entries: Vec<Value> = rows
         .iter()
@@ -10289,10 +10343,11 @@ pub async fn get_audit_logs(
         .collect();
 
     Ok(Json(json!({
-        "data":   entries,
-        "total":  total,
-        "limit":  limit,
-        "offset": offset,
+        "data":        entries,
+        "total":       total,
+        "limit":       limit,
+        "offset":      offset,
+        "next_cursor": next_cursor,
     })))
 }
 
@@ -10308,6 +10363,8 @@ pub struct AuditLogQueryParams {
     pub to:            Option<String>,
     pub limit:         Option<i64>,
     pub offset:        Option<i64>,
+    pub cursor:        Option<String>,
+    pub include_total: Option<bool>,
 }
 
 // ── Issue #671: GET /v1/analytics/trending ───────────────────────────────────
@@ -10476,7 +10533,9 @@ pub async fn get_export_job_status_db(
     tag = "export",
     params(
         ("limit"  = Option<i64>, Query, description = "Max rows to return (default 20, max 100)"),
-        ("offset" = Option<i64>, Query, description = "Pagination offset"),
+        ("offset" = Option<i64>, Query, description = "Deprecated: use cursor"),
+        ("cursor" = Option<String>, Query, description = "Opaque keyset cursor from next_cursor"),
+        ("include_total" = Option<bool>, Query, description = "Include exact total (COUNT(*)), default false"),
         ("status" = Option<String>, Query, description = "Filter by status: pending, completed, failed"),
     ),
     responses(
@@ -10491,31 +10550,63 @@ pub async fn get_export_history(
 ) -> Result<Json<Value>, AppError> {
     let limit  = params.limit.unwrap_or(20).clamp(1, 100);
     let offset = params.offset.unwrap_or(0).max(0);
+    let include_total = params.include_total.unwrap_or(false);
+    let cursor_key: Option<(DateTime<Utc>, Uuid)> = params
+        .cursor
+        .as_deref()
+        .map(decode_created_at_cursor)
+        .transpose()?;
 
-    let (where_clause, status_bind) = if let Some(ref s) = params.status {
-        ("WHERE status = $1".to_string(), Some(s.clone()))
+    let mut conditions: Vec<String> = Vec::new();
+    let mut idx: i32 = 1;
+    if params.status.is_some() {
+        conditions.push(format!("status = ${idx}"));
+        idx += 1;
+    }
+    if cursor_key.is_some() {
+        conditions.push(format!("(created_at, id) < (${idx}, ${})", idx + 1));
+        idx += 2;
+    }
+    let where_clause = if conditions.is_empty() {
+        String::new()
     } else {
-        (String::new(), None)
+        format!("WHERE {}", conditions.join(" AND "))
     };
-
-    let (lim_idx, off_idx) = if status_bind.is_some() { (2i32, 3i32) } else { (1i32, 2i32) };
 
     let sql = format!(
         "SELECT id, status, format, filter_count, event_count, created_at, completed_at, error \
          FROM batch_download_jobs {where_clause} \
-         ORDER BY created_at DESC LIMIT ${lim_idx} OFFSET ${off_idx}"
+         ORDER BY created_at DESC, id DESC LIMIT ${idx} OFFSET ${}",
+        idx + 1
     );
 
     let mut q = sqlx::query(&sql);
-    if let Some(ref s) = status_bind { q = q.bind(s); }
+    if let Some(ref s) = params.status { q = q.bind(s); }
+    if let Some((created_at, id)) = cursor_key { q = q.bind(created_at).bind(id); }
     q = q.bind(limit).bind(offset);
 
     let rows = q.fetch_all(&state.pool).await?;
 
-    let total_sql = format!("SELECT COUNT(*) FROM batch_download_jobs {where_clause}");
-    let mut tq = sqlx::query_scalar::<_, i64>(&total_sql);
-    if let Some(ref s) = status_bind { tq = tq.bind(s); }
-    let total: i64 = tq.fetch_one(&state.pool).await?;
+    // Count only when requested (COUNT(*) is costly on large tables)
+    let total: Option<i64> = if include_total {
+        let count_where = if params.status.is_some() { "WHERE status = $1" } else { "" };
+        let total_sql = format!("SELECT COUNT(*) FROM batch_download_jobs {count_where}");
+        let mut tq = sqlx::query_scalar::<_, i64>(&total_sql);
+        if let Some(ref s) = params.status { tq = tq.bind(s); }
+        Some(tq.fetch_one(&state.pool).await?)
+    } else {
+        None
+    };
+
+    let next_cursor: Option<String> = if rows.len() as i64 == limit {
+        rows.last().and_then(|row| {
+            let created_at = row.try_get::<DateTime<Utc>, _>("created_at").ok()?;
+            let id = row.try_get::<Uuid, _>("id").ok()?;
+            Some(encode_created_at_cursor(created_at, id))
+        })
+    } else {
+        None
+    };
 
     let jobs: Vec<Value> = rows
         .iter()
@@ -10532,10 +10623,11 @@ pub async fn get_export_history(
         .collect();
 
     Ok(Json(json!({
-        "jobs":   jobs,
-        "total":  total,
-        "limit":  limit,
-        "offset": offset,
+        "jobs":        jobs,
+        "total":       total,
+        "limit":       limit,
+        "offset":      offset,
+        "next_cursor": next_cursor,
     })))
 }
 
@@ -10545,6 +10637,8 @@ pub struct ExportHistoryParams {
     pub limit:  Option<i64>,
     pub offset: Option<i64>,
     pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub include_total: Option<bool>,
 }
 
 // ── Issue #586 / #587 / #710: Replication, feature flags, and backup verification tests ──
