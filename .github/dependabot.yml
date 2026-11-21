@@ -9,7 +9,9 @@ updates:
       - "dependencies"
       - "rust"
 
-  # Keep Docker base images up to date
+  # Keep Docker base images up to date.
+  # This covers the root Dockerfile (directory "/"), including the pinned
+  # distroless runtime image digest, so digest bumps are opened automatically.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -17,6 +19,8 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    commit-message:
+      prefix: "docker"
 
   # Keep GitHub Actions pinned SHAs current.
   # Dependabot will open PRs to update the SHA comment and the pinned hash

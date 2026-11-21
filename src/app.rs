@@ -843,6 +843,32 @@ impl AppBuilder {
             incident_correlation::spawn_detector(pool.clone(), incident_config, shutdown_rx.clone());
         }
 
+        // Issue #1416: Spawn the scheduled replay loop. It polls the persisted
+        // replay schedules and dispatches any that are due, so scheduled replays
+        // actually run instead of being dead code.
+        {
+            let replay_pool = pool.clone();
+            let replay_interval_secs = config.scheduled_replay_interval_secs;
+            let mut replay_shutdown_rx = shutdown_rx.clone();
+            info!(
+                interval_secs = replay_interval_secs,
+                "Starting scheduled replay job"
+            );
+            jobs.spawn("scheduled-replay", async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(replay_interval_secs));
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            if let Err(e) = crate::scheduled_replay::process_due_schedules(&replay_pool).await {
+                                warn!(error = %e, "Scheduled replay tick failed");
+                            }
+                        }
+                        _ = replay_shutdown_rx.changed() => break,
+                    }
+                }
+            });
+        }
+
         // #496: Spawn audit log purge job
         {
             let audit_pool = pool.clone();

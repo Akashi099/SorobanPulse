@@ -172,5 +172,8 @@ pub mod partition_manager;
 pub mod notification_admin;
 pub mod meta;
 pub mod api_keys;
+pub mod event_tagging;
+pub mod scheduled_replay;
+pub mod timezone_locale;
 #[cfg(feature = "archive")]
 pub mod archiver;

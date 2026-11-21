@@ -814,6 +814,19 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/events/filter", axum::routing::post(crate::filter_dsl::get_events_with_dsl))
         .route("/admin/dsl/compile", axum::routing::post(crate::filter_dsl::compile_dsl_filter))
         .route("/admin/dsl/filters", axum::routing::post(crate::filter_dsl::save_dsl_filter).get(crate::filter_dsl::list_dsl_filters))
+        // Issue #1416: event tagging, scheduled replay, and timezone/locale
+        // modules are now compiled and reachable at runtime.
+        .route("/events/tags", axum::routing::get(crate::event_tagging::list_tags).post(crate::event_tagging::create_tag))
+        .route("/events/tags/{tag}", axum::routing::delete(crate::event_tagging::delete_tag))
+        .route("/events/{id}/tags", axum::routing::get(crate::event_tagging::get_event_tags).post(crate::event_tagging::tag_event))
+        .route("/events/{id}/tags/{tag}", axum::routing::delete(crate::event_tagging::untag_event))
+        .route("/admin/scheduled-replays", axum::routing::get(crate::scheduled_replay::list_scheduled_replays).post(crate::scheduled_replay::create_scheduled_replay))
+        .route("/admin/scheduled-replays/{id}", axum::routing::get(crate::scheduled_replay::get_scheduled_replay).delete(crate::scheduled_replay::cancel_scheduled_replay))
+        .route("/admin/scheduled-replays/{id}/run", axum::routing::post(crate::scheduled_replay::run_scheduled_replay))
+        .route("/timezone", axum::routing::get(crate::timezone_locale::get_timezone))
+        .route("/timezone/{timezone}", axum::routing::get(crate::timezone_locale::get_timezone_info))
+        .route("/locales", axum::routing::get(crate::timezone_locale::list_locales))
+        .route("/locales/{locale}", axum::routing::get(crate::timezone_locale::get_locale))
         // Append Link preload headers to responses for
         // /v1/events/contract/{contract_id} when the feature flag is on.
         .route_layer(axum::middleware::from_fn_with_state(
