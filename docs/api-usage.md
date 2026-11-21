@@ -405,6 +405,39 @@ wording).  Examples:
 
 > Older clients that read the legacy `error` field should migrate to `detail`.
 
+### Server-side and database failures
+
+Server-side failures — including database errors, connection-pool exhaustion,
+and unexpected query failures — are reported as **`5xx`** responses with the
+`https://sorobanpulse.dev/errors/internal` problem type.  They are **never**
+reported as `4xx`: a `4xx` means *your request* was wrong, a `5xx` means *the
+server* failed to handle an otherwise valid request.
+
+```json
+{
+  "type": "https://sorobanpulse.dev/errors/internal",
+  "title": "Internal server error",
+  "status": 500,
+  "detail": "An internal error occurred. Please contact support with the request ID.",
+  "instance": "/v1/contracts/CA3D.../stats",
+  "request_id": "01J9Z8Q2V3K4M5N6P7R8S9T0AB"
+}
+```
+
+Key guarantees:
+
+- **No raw database text.** Response bodies never contain raw `sqlx` or
+  PostgreSQL error text (table/column names, constraint names, SQL fragments,
+  or values).  The full error is logged server-side only.
+- **Generic `detail`.** The `detail` field is a fixed, generic message.  Do not
+  parse it; branch on `type` and `status` instead.
+- **Correlation ID.** Every `internal` response carries a `request_id`.  Quote
+  it when contacting support or when correlating with server logs — the same
+  ID appears in the server-side log entry for the failure.
+
+If you see a `4xx` where you expected a `5xx` (or vice versa), or a `detail`
+that looks like a database message, please report it — that is a bug.
+
 ### HTTP status codes
 
 Each endpoint's possible status codes are listed in the
@@ -420,6 +453,10 @@ HTTP_CODE=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
 
 if [ "$HTTP_CODE" -ne 200 ]; then
   echo "Error $HTTP_CODE: $(jq -r .detail /tmp/resp.json)"
+  # For 5xx, capture the request ID for support
+  if [ "$HTTP_CODE" -ge 500 ]; then
+    echo "Request ID: $(jq -r '.request_id // "n/a"' /tmp/resp.json)"
+  fi
   exit 1
 fi
 cat /tmp/resp.json
@@ -432,6 +469,9 @@ resp = requests.get("http://localhost:3000/v1/events")
 if resp.status_code >= 400:
     problem = resp.json()  # Content-Type: application/problem+json
     print(problem["type"], problem["title"], problem.get("detail"))
+    if resp.status_code >= 500:
+        # Log the correlation ID so support can find the server-side error
+        print("request_id:", problem.get("request_id"))
 ```
 
 ### Retryable vs non-retryable errors
@@ -710,6 +750,9 @@ curl -H "X-Api-Key: $API_KEY" http://localhost:3000/v1/contracts/$CONTRACT_ID/st
 - Returns `404` until resource data exists for the contract. Collection is
   opt-in on the indexer: set `RESOURCE_STATS_ENABLED=true` (one extra
   `getTransaction` call per new transaction).
+- If the underlying database query fails, the endpoint returns `500` with the
+  `internal` problem type and a `request_id` — never a `4xx` and never raw
+  database error text.
 
 The full response schema is in the [API reference](api-reference.md).
 
