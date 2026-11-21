@@ -47,6 +47,9 @@ spec:
             limits:
               cpu: "1000m"
               memory: "512Mi"
+          # Admin routes (/v1/admin/*) fail closed: they return 403 unless an admin
+          # credential is configured. Provide ADMIN_API_KEY (or a DB-backed key with
+          # the `admin` scope) via the `soroban-pulse-secrets` Secret to enable them.
           envFrom:
             - configMapRef:
                 name: soroban-pulse-config

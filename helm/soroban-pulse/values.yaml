@@ -82,12 +82,21 @@ dashboard:
 # file excluded from version control.
 secrets:
   databaseUrl: "postgres://<USER>:<PASSWORD>@<HOST>:5432/<DATABASE>"
+  # Regular API key (sets API_KEY). When empty, non-admin endpoints are open.
   apiKey: ""
+  # Admin API key (sets ADMIN_API_KEY). REQUIRED to use any /v1/admin/*
+  # endpoint: admin routes are fail-closed, so without this key (or a
+  # DB-backed key with `admin` scope) every admin request returns 403.
+  # Supply it from a secret (existingSecret / external-secrets / Vault),
+  # never commit a real value here.
+  adminApiKey: ""
   smtpPassword: ""
 
 # When set to a non-empty name the chart will NOT create a Secret and will
 # reference this pre-existing Secret instead. The Secret must contain the same
-# keys: DATABASE_URL, API_KEY, SMTP_PASSWORD.
+# keys: DATABASE_URL, API_KEY, ADMIN_API_KEY, SMTP_PASSWORD.
+# ADMIN_API_KEY is required for admin access; admin routes fail closed (403)
+# when no admin credential is configured.
 # Recommended for production when using external-secrets, Vault Agent, or
 # Sealed Secrets.
 existingSecret: ""
