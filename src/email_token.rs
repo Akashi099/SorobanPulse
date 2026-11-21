@@ -33,14 +33,17 @@
 //! # References
 //!
 //! - Issue #1158 — Abuse protection for public email tracking, unsubscribe and bounce endpoints
+//! - Issue #1421 — Real SNS/SES bounce webhook signature verification
+//! - Issue #1422 — Real SendGrid event webhook ECDSA signature verification
 
-// ⚠️  WARNING: Do not test — implement only (issue #1158).
-
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
+use sha1::Sha1;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
@@ -58,6 +61,21 @@ const SECRET_ENV: &str = "EMAIL_TOKEN_SECRET";
 
 /// Environment variable to require bounce webhook signatures.
 const BOUNCE_SIG_REQUIRED_ENV: &str = "BOUNCE_WEBHOOK_SIGNATURE_REQUIRED";
+
+/// Environment variable holding the SendGrid webhook public key (base64 DER).
+const SENDGRID_PUBLIC_KEY_ENV: &str = "SENDGRID_WEBHOOK_PUBLIC_KEY";
+
+/// Environment variable overriding the SNS timestamp tolerance window (seconds).
+const SNS_TIMESTAMP_WINDOW_ENV: &str = "SNS_TIMESTAMP_WINDOW_SECS";
+
+/// Environment variable overriding the SendGrid timestamp tolerance window (seconds).
+const SENDGRID_TIMESTAMP_WINDOW_ENV: &str = "SENDGRID_TIMESTAMP_WINDOW_SECS";
+
+/// Default tolerance window for SNS message timestamps (1 hour).
+pub const DEFAULT_SNS_TIMESTAMP_WINDOW_SECS: u64 = 60 * 60;
+
+/// Default tolerance window for SendGrid event timestamps (5 minutes).
+pub const DEFAULT_SENDGRID_TIMESTAMP_WINDOW_SECS: u64 = 5 * 60;
 
 // ---------------------------------------------------------------------------
 // Token purpose discriminants
@@ -305,6 +323,37 @@ pub fn verify_bounce_signature(
     }
 }
 
+/// Validate the webhook configuration at startup.
+///
+/// Returns an error when a provider is enabled but the material required to
+/// verify its signatures is missing.  Callers should refuse to start (or
+/// disable the affected endpoint) when this returns `Err`.
+///
+/// # Arguments
+///
+/// * `sns_enabled` — whether the SNS/SES bounce endpoint is enabled.
+/// * `sendgrid_enabled` — whether the SendGrid event endpoint is enabled.
+pub fn validate_webhook_config(
+    sns_enabled: bool,
+    sendgrid_enabled: bool,
+) -> Result<(), AppError> {
+    if sendgrid_enabled && sendgrid_public_key().is_none() {
+        let msg = format!(
+            "SendGrid event webhook is enabled but {SENDGRID_PUBLIC_KEY_ENV} is not set; \
+             refusing to accept unsigned events"
+        );
+        tracing::error!("{msg}");
+        return Err(AppError::Internal(msg));
+    }
+    if sns_enabled {
+        // SNS verification material (the signing certificate) is fetched per
+        // message; the only startup requirement is that the outbound client is
+        // available.  Nothing to check here beyond logging.
+        tracing::debug!("SNS bounce webhook signature verification enabled");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -377,7 +426,10 @@ fn verify_sns_signature(
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| AppError::Validation("missing X-Amz-Sns-Message-Type header".into()))?;
 
-    if !matches!(msg_type, "Notification" | "SubscriptionConfirmation" | "UnsubscribeConfirmation") {
+    if !matches!(
+        msg_type,
+        "Notification" | "SubscriptionConfirmation" | "UnsubscribeConfirmation"
+    ) {
         return Err(AppError::Validation(
             "unrecognised X-Amz-Sns-Message-Type value".into(),
         ));
@@ -737,31 +789,329 @@ fn fetch_sns_cert(url: &str) -> Result<String, AppError> {
 
 /// SendGrid event-webhook ECDSA-P256 signature verification.
 ///
-/// Full ECDSA verification requires the public key configured in the SendGrid
-/// dashboard.  This placeholder checks that both required headers are present
-/// and delegates to a marker for the real implementation.
+/// Verifies `ECDSA-P256-SHA256(timestamp || raw_body)` using the public key
+/// from `SENDGRID_WEBHOOK_PUBLIC_KEY` (base64 DER).  The signature header is
+/// base64 DER.  A timestamp tolerance window prevents replay.
 fn verify_sendgrid_signature(
     headers: &axum::http::HeaderMap,
-    _body: &[u8],
+    body: &[u8],
 ) -> Result<(), AppError> {
-    let _sig = headers
+    let sig_b64 = headers
         .get("x-twilio-email-event-webhook-signature")
+        .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
             AppError::Validation(
                 "missing X-Twilio-Email-Event-Webhook-Signature header".into(),
             )
         })?;
-    let _ts = headers
+    let ts_str = headers
         .get("x-twilio-email-event-webhook-timestamp")
+        .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
             AppError::Validation(
                 "missing X-Twilio-Email-Event-Webhook-Timestamp header".into(),
             )
         })?;
 
-    // TODO: implement ECDSA-P256 verification using the public key from
-    //       SENDGRID_WEBHOOK_PUBLIC_KEY.  Tracked in follow-up to #1158.
+    // Fail closed when no public key is configured.
+    let public_key_der = sendgrid_public_key().ok_or_else(|| {
+        tracing::error!(
+            "{SENDGRID_PUBLIC_KEY_ENV} is not set; rejecting SendGrid event webhook"
+        );
+        AppError::Internal("SendGrid webhook public key is not configured".into())
+    })?;
+
+    // Replay protection.
+    let ts_secs: u64 = ts_str.parse().map_err(|_| {
+        AppError::Validation("invalid SendGrid webhook timestamp".into())
+    })?;
+    let window = sendgrid_timestamp_window_secs();
+    if unix_now().abs_diff(ts_secs) > window {
+        log_abuse_attempt("sendgrid: timestamp outside tolerance window");
+        return Err(AppError::Validation(
+            "SendGrid webhook timestamp outside tolerance window".into(),
+        ));
+    }
+
+    // Decode the signature (base64 DER).
+    let signature_der = STANDARD.decode(sig_b64).map_err(|_| {
+        log_abuse_attempt("sendgrid: invalid base64 signature");
+        AppError::Validation("SendGrid signature is not valid base64".into())
+    })?;
+
+    // Build the signed payload: timestamp || raw_body.
+    let mut signed = Vec::with_capacity(ts_str.len() + body.len());
+    signed.extend_from_slice(ts_str.as_bytes());
+    signed.extend_from_slice(body);
+
+    if !verify_ecdsa_p256_sha256(&public_key_der, &signed, &signature_der) {
+        log_abuse_attempt("sendgrid: signature verification failed");
+        return Err(AppError::Validation(
+            "SendGrid webhook signature verification failed".into(),
+        ));
+    }
+
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SNS helpers
+// ---------------------------------------------------------------------------
+
+/// Validate an SNS `SigningCertURL`.
+///
+/// Requirements:
+/// - scheme is `https`
+/// - host matches `^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$`
+/// - path ends in `.pem`
+fn is_valid_sns_cert_url(url: &str) -> bool {
+    let rest = match url.strip_prefix("https://") {
+        Some(r) => r,
+        None => return false,
+    };
+    // Split host from path.
+    let (host, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => return false,
+    };
+    // Reject userinfo / port tricks.
+    if host.contains('@') || host.contains(':') {
+        return false;
+    }
+    if !is_valid_sns_host(host) {
+        return false;
+    }
+    // Strip any query/fragment before checking the extension.
+    let path_only = path.split(['?', '#']).next().unwrap_or(path);
+    path_only.ends_with(".pem")
+}
+
+/// Match `^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$`.
+fn is_valid_sns_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let rest = match host.strip_prefix("sns.") {
+        Some(r) => r,
+        None => return false,
+    };
+    let rest = match rest.strip_suffix(".amazonaws.com.cn") {
+        Some(r) => r,
+        None => match rest.strip_suffix(".amazonaws.com") {
+            Some(r) => r,
+            None => return false,
+        },
+    };
+    // `rest` is the region segment: one or more of [a-z0-9-].
+    !rest.is_empty()
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Build the canonical SNS string-to-sign.
+///
+/// The field order differs between `Notification` and the confirmation
+/// message types, per the AWS documentation.
+fn build_sns_string_to_sign(
+    envelope: &serde_json::Value,
+    msg_type: &str,
+) -> Result<String, AppError> {
+    let get = |key: &str| -> Result<&str, AppError> {
+        envelope[key]
+            .as_str()
+            .ok_or_else(|| AppError::Validation(format!("SNS message missing {key}")))
+    };
+
+    let mut s = String::new();
+    let mut push = |label: &str, value: &str| {
+        s.push_str(label);
+        s.push('\n');
+        s.push_str(value);
+        s.push('\n');
+    };
+
+    match msg_type {
+        "Notification" => {
+            push("Message", get("Message")?);
+            push("MessageId", get("MessageId")?);
+            if let Some(subject) = envelope["Subject"].as_str() {
+                push("Subject", subject);
+            }
+            push("Timestamp", get("Timestamp")?);
+            push("TopicArn", get("TopicArn")?);
+            push("Type", get("Type")?);
+        }
+        "SubscriptionConfirmation" | "UnsubscribeConfirmation" => {
+            push("Message", get("Message")?);
+            push("MessageId", get("MessageId")?);
+            push("SubscribeURL", get("SubscribeURL")?);
+            push("Timestamp", get("Timestamp")?);
+            push("Token", get("Token")?);
+            push("TopicArn", get("TopicArn")?);
+            push("Type", get("Type")?);
+        }
+        other => {
+            return Err(AppError::Validation(format!(
+                "unsupported SNS message type: {other}"
+            )))
+        }
+    }
+
+    Ok(s)
+}
+
+/// Per-URL cache of SNS signing certificates (DER).
+fn sns_cert_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Fetch (or retrieve from cache) the SNS signing certificate for `url`.
+///
+/// The certificate is fetched through the SSRF-safe outbound client so that
+/// redirects and DNS rebinding cannot be used to reach internal services.
+fn fetch_sns_certificate(url: &str) -> Result<Vec<u8>, AppError> {
+    if let Some(cached) = sns_cert_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(url).cloned())
+    {
+        return Ok(cached);
+    }
+
+    let pem = crate::net::outbound::fetch_text(url)
+        .map_err(|e| AppError::Internal(format!("failed to fetch SNS certificate: {e}")))?;
+
+    let der = pem_to_der(&pem).ok_or_else(|| {
+        AppError::Validation("SNS signing certificate is not valid PEM".into())
+    })?;
+
+    if let Ok(mut cache) = sns_cert_cache().lock() {
+        cache.insert(url.to_owned(), der.clone());
+    }
+
+    Ok(der)
+}
+
+/// Extract DER bytes from a PEM-encoded certificate.
+fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
+    let begin = "-----BEGIN CERTIFICATE-----";
+    let end = "-----END CERTIFICATE-----";
+    let start = pem.find(begin)? + begin.len();
+    let stop = pem[start..].find(end)? + start;
+    let b64: String = pem[start..stop]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    STANDARD.decode(b64).ok()
+}
+
+/// Verify an RSA PKCS#1 v1.5 signature over SHA1.
+fn verify_rsa_pkcs1_sha1(cert_der: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::signature::Verifier;
+    use rsa::RsaPublicKey;
+    use sha1::Digest as _;
+
+    let key = match extract_rsa_public_key(cert_der) {
+        Some(k) => k,
+        None => return false,
+    };
+    let _ = RsaPublicKey::default(); // keep import used across feature sets
+    let verifying_key = VerifyingKey::<Sha1>::new(key);
+    let sig = match Signature::try_from(signature) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = Sha1::new();
+    verifying_key.verify(message, &sig).is_ok()
+}
+
+/// Verify an RSA PKCS#1 v1.5 signature over SHA256.
+fn verify_rsa_pkcs1_sha256(cert_der: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::signature::Verifier;
+
+    let key = match extract_rsa_public_key(cert_der) {
+        Some(k) => k,
+        None => return false,
+    };
+    let verifying_key = VerifyingKey::<Sha256>::new(key);
+    let sig = match Signature::try_from(signature) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    verifying_key.verify(message, &sig).is_ok()
+}
+
+/// Extract an RSA public key from a DER-encoded X.509 certificate.
+fn extract_rsa_public_key(cert_der: &[u8]) -> Option<rsa::RsaPublicKey> {
+    use rsa::pkcs1::DecodeRsaPublicKey;
+    use rsa::pkcs8::DecodePublicKey;
+    use x509_parser::prelude::*;
+
+    let (_, cert) = X509Certificate::from_der(cert_der).ok()?;
+    let spki = cert.public_key();
+    let der = spki.raw;
+
+    // Try PKCS#8 SubjectPublicKeyInfo first, then PKCS#1.
+    if let Ok(key) = rsa::RsaPublicKey::from_public_key_der(der) {
+        return Some(key);
+    }
+    rsa::RsaPublicKey::from_pkcs1_der(der).ok()
+}
+
+/// Read the SNS timestamp tolerance window from the environment.
+fn sns_timestamp_window_secs() -> u64 {
+    std::env::var(SNS_TIMESTAMP_WINDOW_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_SNS_TIMESTAMP_WINDOW_SECS)
+}
+
+/// Read the SendGrid timestamp tolerance window from the environment.
+fn sendgrid_timestamp_window_secs() -> u64 {
+    std::env::var(SENDGRID_TIMESTAMP_WINDOW_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_SENDGRID_TIMESTAMP_WINDOW_SECS)
+}
+
+/// Read the SendGrid webhook public key (base64 DER) from the environment.
+fn sendgrid_public_key() -> Option<Vec<u8>> {
+    let raw = std::env::var(SENDGRID_PUBLIC_KEY_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    STANDARD.decode(trimmed).ok()
+}
+
+/// Verify an ECDSA-P256-SHA256 signature.
+fn verify_ecdsa_p256_sha256(public_key_der: &[u8], message: &[u8], signature_der: &[u8]) -> bool {
+    use p256::ecdsa::signature::Verifier;
+    use p256::ecdsa::{Signature, VerifyingKey};
+    use p256::pkcs8::DecodePublicKey;
+
+    let key = match VerifyingKey::from_public_key_der(public_key_der) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let sig = match Signature::from_der(signature_der) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    key.verify(message, &sig).is_ok()
+}
+
+/// Parse an RFC 3339 timestamp into a Unix timestamp (seconds).
+fn parse_rfc3339_unix(s: &str) -> Option<u64> {
+    let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+    let secs = dt.timestamp();
+    if secs < 0 {
+        None
+    } else {
+        Some(secs as u64)
+    }
 }
 
 /// Shared-secret HMAC-SHA256 verification.

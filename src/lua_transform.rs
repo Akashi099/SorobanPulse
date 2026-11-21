@@ -11,18 +11,105 @@ use mlua::{Lua, LuaOptions, StdLib, Table, Value as LuaValue};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 /// Lua script executor for event transformation
 pub struct LuaTransformer {
     lua: Arc<Lua>,
     timeout: Duration,
+    instruction_limit: u64,
     script_path: String,
 }
 
-const LUA_INSTRUCTION_LIMIT: u32 = 1_000_000;
+const LUA_INSTRUCTION_LIMIT: u64 = 1_000_000;
 const LUA_MEMORY_LIMIT_MB: usize = 64;
+/// How often the instruction hook fires. Smaller values give tighter
+/// enforcement of the deadline at the cost of a little overhead.
+const LUA_HOOK_INTERVAL: u32 = 10_000;
+
+/// Standard libraries exposed to user scripts. Notably this excludes `os`,
+/// `io`, `package`, `debug` and `coroutine`.
+fn sandbox_stdlib() -> StdLib {
+    StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8
+}
+
+/// Build a sandboxed Lua state: restricted stdlib, memory limit, and the
+/// dangerous globals removed from the global table.
+fn create_sandboxed_lua() -> Result<Lua> {
+    let lua = Lua::new_with(sandbox_stdlib(), LuaOptions::default())
+        .context("failed to create sandboxed Lua state")?;
+
+    // Set memory limit (in bytes)
+    lua.set_memory_limit(LUA_MEMORY_LIMIT_MB * 1024 * 1024)?;
+
+    // Remove escape hatches from the global environment.
+    let globals = lua.globals();
+    for name in [
+        "load",
+        "loadstring",
+        "dofile",
+        "loadfile",
+        "require",
+        "collectgarbage",
+    ] {
+        globals.set(name, LuaValue::Nil)?;
+    }
+
+    // `string.dump` can be used to produce bytecode that `load` would accept;
+    // remove it as defense in depth.
+    if let Ok(string_lib) = globals.get::<_, Table>("string") {
+        string_lib.set("dump", LuaValue::Nil)?;
+    }
+
+    Ok(lua)
+}
+
+/// Build the sandboxed `_ENV` table used to run user code. It contains only an
+/// explicit whitelist of safe globals.
+fn create_sandbox_env(lua: &Lua) -> Result<Table> {
+    let env = lua.create_table()?;
+    let globals = lua.globals();
+
+    // Whitelisted standard library tables.
+    for name in ["string", "table", "math", "utf8"] {
+        if let Ok(lib) = globals.get::<_, Table>(name) {
+            env.set(name, lib)?;
+        }
+    }
+
+    // Whitelisted safe globals.
+    for name in ["assert", "error", "ipairs", "next", "pairs", "pcall", "select", "tonumber", "tostring", "type", "xpcall"] {
+        if let Ok(v) = globals.get::<_, LuaValue>(name) {
+            if !matches!(v, LuaValue::Nil) {
+                env.set(name, v)?;
+            }
+        }
+    }
+
+    Ok(env)
+}
+
+/// Install an instruction-count hook that enforces both an instruction budget
+/// and a wall-clock deadline. Returns `Err` from the hook when either limit is
+/// exceeded, which aborts the running script.
+fn install_limits(lua: &Lua, instruction_limit: u64, deadline: Instant) -> Result<()> {
+    let mut executed: u64 = 0;
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(LUA_HOOK_INTERVAL),
+        move |_lua, _debug| {
+            executed = executed.saturating_add(LUA_HOOK_INTERVAL as u64);
+            if executed > instruction_limit {
+                return Err(mlua::Error::RuntimeError("limit exceeded".to_string()));
+            }
+            if Instant::now() >= deadline {
+                return Err(mlua::Error::RuntimeError("limit exceeded".to_string()));
+            }
+            Ok(mlua::VmState::Continue)
+        },
+    )?;
+    Ok(())
+}
 
 /// Globals that are explicitly removed from the interpreter before any user
 /// script runs. `os`/`io`/`package`/`debug` are never loaded (see
@@ -122,15 +209,20 @@ impl LuaTransformer {
         let script_content = std::fs::read_to_string(script_path)
             .with_context(|| format!("Failed to read Lua script: {}", script_path.display()))?;
 
+        // Run the script body inside the sandboxed environment.
+        let env = create_sandbox_env(&lua)?;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        install_limits(&lua, instruction_limit, deadline)?;
         lua.load(&script_content)
             .set_environment(env)
             .exec()
             .with_context(|| format!("Failed to execute Lua script: {}", script_path.display()))?;
+        lua.remove_hook();
 
         debug!(
             script_path = %script_path.display(),
             timeout_ms = timeout_ms,
-            instruction_limit = LUA_INSTRUCTION_LIMIT,
+            instruction_limit = instruction_limit,
             memory_limit_mb = LUA_MEMORY_LIMIT_MB,
             "Lua transformer initialized"
         );
@@ -138,6 +230,7 @@ impl LuaTransformer {
         Ok(Self {
             lua: Arc::new(lua),
             timeout: Duration::from_millis(timeout_ms),
+            instruction_limit,
             script_path: script_path.display().to_string(),
         })
     }
@@ -151,18 +244,26 @@ impl LuaTransformer {
     pub async fn transform(&self, event: SorobanEvent) -> Result<Option<SorobanEvent>> {
         let lua = self.lua.clone();
         let timeout = self.timeout;
+        let instruction_limit = self.instruction_limit;
         let script_path = self.script_path.clone();
-        
-        // Run the Lua transformation in a blocking task with timeout
+
+        // The instruction/time hook is the primary termination mechanism; the
+        // async timeout is only a backstop. The hook fires inside the blocking
+        // task and aborts the script, so the blocking thread is released.
         let result = tokio::time::timeout(
             timeout,
-            tokio::task::spawn_blocking(move || Self::transform_sync(&lua, event)),
+            tokio::task::spawn_blocking(move || {
+                Self::transform_sync(&lua, event, instruction_limit, timeout)
+            }),
         )
         .await;
 
         match result {
             Ok(Ok(transformed)) => Ok(transformed),
             Ok(Err(e)) => {
+                if Self::is_limit_error(&e) {
+                    metrics::record_lua_timeout();
+                }
                 warn!(error = %e, script_path = %script_path, "Lua transformation failed");
                 Err(e)
             }
@@ -174,13 +275,27 @@ impl LuaTransformer {
         }
     }
 
+    /// Whether an error originated from the instruction/time limit hook.
+    fn is_limit_error(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| {
+            cause
+                .downcast_ref::<mlua::Error>()
+                .map(|e| matches!(e, mlua::Error::RuntimeError(msg) if msg == "limit exceeded"))
+                .unwrap_or(false)
+        })
+    }
+
     /// Synchronous transformation logic
-    fn transform_sync(lua: &Lua, event: SorobanEvent) -> Result<Option<SorobanEvent>> {
-        // Set instruction hook to limit CPU usage
-        lua.set_hook(mlua::HookTriggers::new().with_every_nth_instruction(1000), |_lua, _debug| {
-            Err(mlua::Error::external("Instruction limit exceeded"))
-        })?;
-        
+    fn transform_sync(
+        lua: &Lua,
+        event: SorobanEvent,
+        instruction_limit: u64,
+        timeout: Duration,
+    ) -> Result<Option<SorobanEvent>> {
+        // Install the instruction/time limit hook for this invocation.
+        let deadline = Instant::now() + timeout;
+        install_limits(lua, instruction_limit, deadline)?;
+
         // Get the transform_event function from the Lua script
         let transform_fn: mlua::Function = lua
             .globals()
@@ -194,6 +309,9 @@ impl LuaTransformer {
         let result: LuaValue = transform_fn
             .call(event_table)
             .context("Error calling transform_event function")?;
+
+        // Remove the hook so it does not leak into subsequent invocations.
+        lua.remove_hook();
 
         // Handle the result
         match result {
@@ -394,7 +512,12 @@ impl LuaTransformer {
             let outcome = tokio::time::timeout(
                 timeout,
                 tokio::task::spawn_blocking(move || {
-                    Self::preview_event_sync(&script_clone, event)
+                    Self::preview_event_sync(
+                        &script_clone,
+                        event,
+                        LUA_INSTRUCTION_LIMIT,
+                        timeout,
+                    )
                 }),
             )
             .await;
@@ -449,7 +572,8 @@ impl LuaTransformer {
             .set_environment(env)
             .exec()
             .context("failed to compile preview script")?;
-        Self::transform_sync(&lua, event)
+        lua.remove_hook();
+        Self::transform_sync(&lua, event, instruction_limit, timeout)
     }
 
     /// Wrap a bare script body into an implicit `transform_event` function

@@ -95,6 +95,7 @@ pub fn validate(cfg: &Config) -> ConfigValidationReport {
     check_email(&mut report, cfg);
     check_encryption(&mut report, cfg);
     check_performance_thresholds(&mut report, cfg);
+    check_webhook_verifiers(&mut report, cfg);
 
     report
 }
@@ -454,6 +455,51 @@ fn check_performance_thresholds(report: &mut ConfigValidationReport, cfg: &Confi
     }
 }
 
+/// Issue #1421 / #1422: inbound bounce/complaint webhook verifiers must be
+/// usable before the service starts.  A provider that is enabled but cannot
+/// verify signatures would accept forged events, so misconfiguration is fatal.
+fn check_webhook_verifiers(report: &mut ConfigValidationReport, cfg: &Config) {
+    // ── SendGrid event webhook (ECDSA-P256-SHA256) ────────────────────────
+    if cfg.sendgrid_webhook_enabled {
+        match cfg.sendgrid_webhook_public_key.as_deref() {
+            None => report.add_error(
+                "SENDGRID_WEBHOOK_ENABLED=true but SENDGRID_WEBHOOK_PUBLIC_KEY is not set — \
+                 SendGrid event signatures cannot be verified; set the base64 DER public key \
+                 from the SendGrid UI or disable the endpoint",
+            ),
+            Some(key) => {
+                if let Err(e) = crate::email_token::validate_sendgrid_public_key(key) {
+                    report.add_error(format!(
+                        "SENDGRID_WEBHOOK_PUBLIC_KEY is invalid: {e} — expected a base64-encoded \
+                         DER SubjectPublicKeyInfo for an ECDSA P-256 key"
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── AWS SNS / SES bounce webhook (RSA PKCS#1 v1.5) ────────────────────
+    if cfg.sns_webhook_enabled {
+        if !crate::email_token::sns_verification_available() {
+            report.add_error(
+                "SNS_WEBHOOK_ENABLED=true but SNS signature verification is unavailable \
+                 (outbound HTTP client could not be initialised) — refusing to start with an \
+                 unauthenticated bounce endpoint; disable the endpoint or fix the outbound client",
+            );
+        }
+        if cfg.sns_timestamp_tolerance_secs == 0 {
+            report.add_error(
+                "SNS_TIMESTAMP_TOLERANCE_SECS=0 disables replay protection for SNS notifications",
+            );
+        } else if cfg.sns_timestamp_tolerance_secs > 24 * 60 * 60 {
+            report.add_warning(format!(
+                "SNS_TIMESTAMP_TOLERANCE_SECS={} is larger than 24 hours — replay protection is weak",
+                cfg.sns_timestamp_tolerance_secs
+            ));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Config schema documentation generator (Issue #997)
 // ---------------------------------------------------------------------------
@@ -738,6 +784,35 @@ pub fn config_schema() -> Vec<ConfigFieldDoc> {
             env_var: "WEBHOOK_REQUIRE_HTTPS",
             description: "Reject webhook URLs that use plain HTTP",
             default: Some("false"),
+            required: false,
+            category: "webhook",
+        },
+        // ── Inbound bounce webhooks (Issues #1421, #1422) ────────────────
+        ConfigFieldDoc {
+            env_var: "SENDGRID_WEBHOOK_ENABLED",
+            description: "Enable the SendGrid event webhook endpoint. Requires SENDGRID_WEBHOOK_PUBLIC_KEY",
+            default: Some("false"),
+            required: false,
+            category: "webhook",
+        },
+        ConfigFieldDoc {
+            env_var: "SENDGRID_WEBHOOK_PUBLIC_KEY",
+            description: "Base64-encoded DER ECDSA P-256 public key used to verify SendGrid event signatures (ECDSA-P256-SHA256 over timestamp || body)",
+            default: None,
+            required: false,
+            category: "webhook",
+        },
+        ConfigFieldDoc {
+            env_var: "SNS_WEBHOOK_ENABLED",
+            description: "Enable the AWS SNS/SES bounce and complaint webhook endpoint. Requires outbound HTTP access to fetch SNS signing certificates",
+            default: Some("false"),
+            required: false,
+            category: "webhook",
+        },
+        ConfigFieldDoc {
+            env_var: "SNS_TIMESTAMP_TOLERANCE_SECS",
+            description: "Maximum age in seconds of an SNS notification before it is rejected as a replay",
+            default: Some("3600"),
             required: false,
             category: "webhook",
         },
