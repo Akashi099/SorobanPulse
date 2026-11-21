@@ -12,7 +12,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::{error, info, warn};
 
-use crate::error::ApiError;
+use crate::error::{ApiError, AppError};
 
 // ---------------------------------------------------------------------------
 // Existing types (preserved for backward compatibility)
@@ -152,7 +152,9 @@ pub async fn refresh_table_statistics(
     let results: Vec<(String, String, i32)> = sqlx::query_as(&query)
         .fetch_all(pool)
         .await
-        .map_err(|e| ApiError::BadRequest(format!("Failed to refresh statistics: {}", e)))?;
+        .map_err(|e| {
+            AppError::from_sqlx(e, "refresh_table_statistics").into_api_error()
+        })?;
 
     info!("Statistics refresh completed for {} tables", results.len());
     Ok(results)
@@ -168,7 +170,9 @@ pub async fn detect_stale_statistics(
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| ApiError::BadRequest(format!("Failed to detect stale statistics: {}", e)))?;
+    .map_err(|e| {
+        AppError::from_sqlx(e, "detect_stale_statistics").into_api_error()
+    })?;
 
     let stale_count = results.iter().filter(|r| r.is_stale).count();
     if stale_count > 0 {
@@ -182,7 +186,9 @@ pub async fn get_statistics_report(pool: &PgPool) -> Result<Vec<StatisticsReport
     sqlx::query_as("SELECT * FROM get_statistics_report()")
         .fetch_all(pool)
         .await
-        .map_err(|e| ApiError::BadRequest(format!("Failed to get statistics report: {}", e)))
+        .map_err(|e| {
+            AppError::from_sqlx(e, "get_statistics_report").into_api_error()
+        })
 }
 
 /// Get recent statistics analysis jobs.
@@ -200,7 +206,9 @@ pub async fn get_recent_analysis_jobs(
     .bind(limit)
     .fetch_all(pool)
     .await
-    .map_err(|e| ApiError::BadRequest(format!("Failed to get analysis jobs: {}", e)))
+    .map_err(|e| {
+        AppError::from_sqlx(e, "get_recent_analysis_jobs").into_api_error()
+    })
 }
 
 /// Schedule automatic statistics refresh for stale tables.
@@ -275,7 +283,9 @@ pub async fn run_extended_statistics(
         sqlx::query(&create_sql)
             .execute(pool)
             .await
-            .map_err(|e| ApiError::BadRequest(format!("Failed to create extended stats: {}", e)))?;
+            .map_err(|e| {
+                AppError::from_sqlx(e, "run_extended_statistics").into_api_error()
+            })?;
         info!(stat_name, table = tbl, "Extended statistics object created");
     }
 
@@ -284,7 +294,9 @@ pub async fn run_extended_statistics(
     sqlx::query(&analyze_sql)
         .execute(pool)
         .await
-        .map_err(|e| ApiError::BadRequest(format!("ANALYZE after extended stats failed: {}", e)))?;
+        .map_err(|e| {
+            AppError::from_sqlx(e, "run_extended_statistics_analyze").into_api_error()
+        })?;
 
     Ok(())
 }
@@ -310,7 +322,9 @@ pub async fn collect_histogram_statistics(
     .bind(table_name)
     .fetch_all(pool)
     .await
-    .map_err(|e| ApiError::BadRequest(format!("pg_stats query failed: {}", e)))?;
+    .map_err(|e| {
+        AppError::from_sqlx(e, "collect_histogram_statistics").into_api_error()
+    })?;
 
     Ok(rows
         .into_iter()
@@ -339,7 +353,9 @@ pub async fn track_query_plan(
     let plan_json: serde_json::Value = sqlx::query_scalar(&explain_sql)
         .fetch_one(pool)
         .await
-        .map_err(|e| ApiError::BadRequest(format!("EXPLAIN failed for '{}': {}", query_label, e)))?;
+        .map_err(|e| {
+            AppError::from_sqlx(e, "track_query_plan").into_api_error()
+        })?;
 
     // Parse top-level plan node
     let plan_node = plan_json
@@ -487,10 +503,7 @@ pub async fn update_n_distinct_estimate(
         .execute(pool)
         .await
         .map_err(|e| {
-            ApiError::BadRequest(format!(
-                "Failed to set n_distinct for {}.{}: {}",
-                table_name, column_name, e
-            ))
+            AppError::from_sqlx(e, "update_n_distinct_estimate").into_api_error()
         })?;
     info!(table = table_name, column = column_name, n_distinct, "n_distinct override applied");
     Ok(())
@@ -560,7 +573,9 @@ where
     let mut tx = pool
         .begin()
         .await
-        .map_err(|e| ApiError::BadRequest(format!("Could not begin transaction: {}", e)))?;
+        .map_err(|e| {
+            AppError::from_sqlx(e, "enable_parallel_query_acquire").into_api_error()
+        })?;
 
     for (key, val) in &settings {
         // `set_config(..., true)` scopes the setting to the current transaction.
@@ -570,7 +585,7 @@ where
             .execute(&mut *tx)
             .await
             .map_err(|e| {
-                ApiError::BadRequest(format!("Failed to set {}: {}", key, e))
+                AppError::from_sqlx(e, "enable_parallel_query_set").into_api_error()
             })?;
     }
 
@@ -793,6 +808,54 @@ mod tests {
             (100.0 - pct) as u32
         };
         assert_eq!(score, 100);
+    }
+
+    #[test]
+    fn internal_sqlx_errors_do_not_leak_schema_details() {
+        // Simulate a Postgres error that would leak schema information.
+        let sqlx_err = sqlx::Error::Protocol(
+            "relation \"secret_table\" column \"internal_col\" does not exist".to_string(),
+        );
+        let app_err = AppError::from_sqlx(sqlx_err, "test_op");
+        let api_err = app_err.into_api_error();
+
+        // Must be a 5xx server error, not a 400-class client error.
+        let status = api_err.status_code();
+        assert!(
+            status.is_server_error(),
+            "expected 5xx status, got {}",
+            status
+        );
+
+        // The serialized problem body must not contain raw sqlx/Postgres text.
+        let body = api_err.to_problem_json();
+        let body_str = body.to_string();
+        assert!(
+            !body_str.contains("secret_table"),
+            "response leaked table name: {}",
+            body_str
+        );
+        assert!(
+            !body_str.contains("internal_col"),
+            "response leaked column name: {}",
+            body_str
+        );
+        assert!(
+            !body_str.contains("does not exist"),
+            "response leaked raw sqlx text: {}",
+            body_str
+        );
+
+        // RFC 7807 `internal` type and a correlation/request id must be present.
+        assert_eq!(
+            body.get("type").and_then(|v| v.as_str()),
+            Some("/errors/internal"),
+            "expected internal problem type"
+        );
+        assert!(
+            body.get("request_id").and_then(|v| v.as_str()).is_some(),
+            "expected a request_id in the problem body"
+        );
     }
 
     #[test]

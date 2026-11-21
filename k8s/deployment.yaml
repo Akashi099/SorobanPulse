@@ -32,7 +32,9 @@ spec:
         fsGroup: 1000
       containers:
         - name: soroban-pulse
-          image: soroban-pulse:latest
+          # Pinned to an immutable published image. Do not use `:latest`.
+          # Override with a digest (ghcr.io/soroban-pulse/sorobanpulse@sha256:...) for reproducible rollouts.
+          image: ghcr.io/soroban-pulse/sorobanpulse:1.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

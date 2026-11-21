@@ -31,9 +31,12 @@ sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "u
 
 # Cryptography - Classical
 sha2 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
 subtle = "2.6"
 aes-gcm = "0.10"
+# Issue #1421: RSA PKCS#1 v1.5 verification of AWS SNS message signatures.
+rsa = { version = "0.9", features = ["sha1", "sha2"] }
 
 
 # Time and dates
@@ -240,6 +243,13 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 # Used sparingly in test modules only.
 wildcard_imports = "allow"
+# Issue #1434: a panic in a request handler or background task can abort a
+# request, poison a mutex or silently kill a long-running task. These start as
+# `warn` so the existing call sites can be converted module by module; raise
+# them to `deny` once the non-test count reaches zero. Test modules are exempt
+# via `allow-unwrap-in-tests` / `allow-expect-in-tests` in `.clippy.toml`.
+unwrap_used = "warn"
+expect_used = "warn"
 
 [profile.release]
 opt-level = 3
