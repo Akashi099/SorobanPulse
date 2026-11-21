@@ -69,8 +69,8 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "soroban-pulse.image" . }}
+          imagePullPolicy: {{ include "soroban-pulse.imagePullPolicy" . }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -167,8 +167,8 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}-api
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "soroban-pulse.image" . }}
+          imagePullPolicy: {{ include "soroban-pulse.imagePullPolicy" . }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -264,8 +264,8 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}-indexer
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "soroban-pulse.image" . }}
+          imagePullPolicy: {{ include "soroban-pulse.imagePullPolicy" . }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
