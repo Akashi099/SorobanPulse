@@ -6,11 +6,15 @@ on:
     paths:
       - "helm/**"
       - "ct.yaml"
+      - "Dockerfile"
+      - "migrations/**"
       - ".github/workflows/helm.yml"
   pull_request:
     paths:
       - "helm/**"
       - "ct.yaml"
+      - "Dockerfile"
+      - "migrations/**"
       - ".github/workflows/helm.yml"
 
 permissions:
