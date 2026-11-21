@@ -2,10 +2,21 @@
 name = "soroban-pulse"
 version = "1.0.0"
 edition = "2021"
+rust-version = "1.87"
 authors = ["SorobanPulse Team"]
 description = "Real-time event streaming and observability platform for Soroban/Stellar blockchain"
 license = "MIT"
 repository = "https://github.com/Soroban-Pulse/SorobanPulse"
+
+[workspace]
+members = ["cli", "fuzz"]
+
+[workspace.dependencies]
+# Stellar XDR (ScVal rendering, ledger meta / contract spec decoding).
+# 26.x is the newest line that still ships the `curr` module the codebase
+# imports. Every crate in the workspace inherits this single version so the
+# indexer, CLI and fuzzers all decode the same bytes identically.
+stellar-xdr = { version = "26.0.1", default-features = false, features = ["std", "curr", "base64", "serde"] }
 
 [dependencies]
 # Web framework
@@ -90,9 +101,9 @@ secrecy = "0.5"
 rand = "0.8"
 
 # Stellar XDR (ScVal rendering, ledger meta / contract spec decoding) and
-# zstd for Galexie ledger files (issues #1252-#1254). 26.x is the newest
-# line that still ships the `curr` module the codebase imports.
-stellar-xdr = { version = "26.0.1", default-features = false, features = ["std", "curr", "base64", "serde"] }
+# zstd for Galexie ledger files (issues #1252-#1254). Inherited from the
+# workspace so every crate shares a single version.
+stellar-xdr.workspace = true
 zstd = "0.13"
 
 # Caching / concurrency
@@ -116,9 +127,6 @@ pprof = { version = "0.13", features = ["flamegraph", "protobuf-codec"] }
 # Heavy / deployment-specific integrations
 # (optional; enabled through the matching cargo features below)
 mlua = { version = "0.10", features = ["lua54", "vendored", "send", "async"], optional = true }
-parquet = { version = "53", default-features = false, features = ["arrow", "zstd", "snap"], optional = true }
-arrow-array = { version = "53", optional = true }
-arrow-schema = { version = "53", optional = true }
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 aws-sdk-kinesis = { version = "1", optional = true }
