@@ -398,6 +398,73 @@ pub fn create_router_with_tx_and_tenant_map(
     let replenish_ms = (60_000u64 / u64::from(rate_limit_per_minute.max(1))).max(1);
     let burst = rate_limit_per_minute.max(1);
 
+    // Admin routes (issue #409, #1440): gated by a dedicated admin auth layer
+    // in addition to the global auth layer. The admin layer is fail-closed:
+    // it requires an ADMIN_API_KEY or a DB-backed key with `admin` scope even
+    // when no regular API_KEY is configured. With no admin credential
+    // configured, every /v1/admin/* request is rejected with 403 (unless
+    // unauthenticated admin access was explicitly enabled for local dev).
+    let admin_routes = Router::new()
+        .route("/admin/lua/preview", axum::routing::post(handlers::lua_preview))
+        .route("/admin/replay", axum::routing::post(handlers::replay_events))
+        .route("/admin/reencrypt", axum::routing::post(handlers::start_reencrypt))
+        .route("/admin/token-transfers/backfill", axum::routing::post(crate::token_events::backfill_token_transfers))
+        .route("/admin/event-addresses/backfill", axum::routing::post(crate::account_events::backfill_event_addresses))
+        .route("/admin/sep41/backfill", axum::routing::post(crate::sep41::backfill_sep41))
+        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi).get(handlers::get_contract_abi))
+        .route("/admin/contracts/{contract_id}/metadata", axum::routing::post(handlers::upsert_contract_metadata).delete(handlers::delete_contract_metadata))
+        .route("/admin/contracts/metadata/import", axum::routing::post(handlers::bulk_import_contract_metadata))
+        .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
+        .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
+        .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
+        .route("/admin/contracts/{contract_id}/schema", axum::routing::post(handlers::register_contract_schema).get(handlers::get_contract_schema).delete(handlers::delete_contract_schema))
+        .route("/admin/contracts/{contract_id}/validate", axum::routing::post(handlers::validate_event_data_against_schema))
+        .route("/admin/schemas", axum::routing::get(handlers::list_contract_schemas))
+        .route("/admin/pool-config", axum::routing::get(handlers::get_pool_tuning_guide))
+        .route("/admin/pool-config/statistics", axum::routing::get(handlers::get_pool_statistics))
+        .route("/admin/pool-config/health", axum::routing::get(handlers::get_pool_health))
+        // Issue #1345: pg_stat_statements slow-query digest
+        .route("/admin/slow-queries", axum::routing::get(handlers::get_slow_queries))
+        .route("/contracts/{id}/resources", axum::routing::get(handlers::get_contract_resources))
+        .route("/admin/indexer/gaps", axum::routing::get(handlers::get_indexer_gaps))
+        .route("/admin/pool-config/adaptive", axum::routing::get(handlers::get_adaptive_pool_status))
+        .route("/admin/pool-config/adaptive/config", axum::routing::put(handlers::update_adaptive_pool_config))
+        .route("/admin/pool-config/adaptive/rollback", axum::routing::post(handlers::rollback_adaptive_pool_config))
+        .route("/admin/statistics/report", axum::routing::get(handlers::get_statistics_report))
+        .route("/admin/statistics/stale", axum::routing::get(handlers::detect_stale_statistics))
+        .route("/admin/statistics/health", axum::routing::get(handlers::get_statistics_health))
+        .route("/admin/statistics/refresh", axum::routing::post(handlers::refresh_statistics))
+        .route("/admin/statistics/jobs", axum::routing::get(handlers::get_analysis_jobs))
+        // #696: SLI / SLO dashboard reporting endpoints (admin-gated)
+        .route("/admin/slo/report", axum::routing::get(handlers::get_slo_report))
+        .route("/admin/jobs", axum::routing::get(crate::job_scheduler::list_jobs))
+        .route("/admin/slo/sample", axum::routing::post(handlers::record_slo_sample))
+        // #894: Backup verification
+        .route("/admin/backup/verification/report", axum::routing::get(handlers::get_backup_verification_report))
+        .route("/admin/backup/verification/trigger", axum::routing::post(handlers::trigger_backup_verification))
+        // #897: Alert silence management
+        .route(
+            "/admin/alerts/silences",
+            axum::routing::post(handlers::create_alert_silence)
+                .get(handlers::get_alert_silences),
+        )
+        .route("/admin/alerts/silences/{silence_id}", axum::routing::delete(handlers::delete_alert_silence))
+        // #839: Push notification delivery analytics
+        .route("/admin/push/analytics", axum::routing::get(crate::push_notification::get_push_analytics))
+        // #879: Webhook circuit breaker admin endpoints
+        .route("/admin/webhook/circuit-breaker", axum::routing::get(handlers::get_circuit_breaker_stats))
+        .route("/admin/webhook/circuit-breaker/{endpoint}", axum::routing::get(handlers::get_endpoint_circuit_breaker_stats))
+        .route("/admin/webhook/circuit-breaker/{endpoint}/reset", axum::routing::post(handlers::reset_circuit_breaker))
+        // #881: Bulk event export endpoints
+        .route("/admin/events/export", axum::routing::post(handlers::start_event_export).get(handlers::list_export_jobs))
+        .route("/admin/events/export/{job_id}", axum::routing::get(handlers::get_export_job_status))
+        .route("/admin/events/export/{job_id}/download", axum::routing::get(handlers::download_export_file))
+        .route("/admin/events/export/cleanup", axum::routing::post(handlers::cleanup_export_files))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&admin_auth_state),
+            middleware::admin_auth_middleware,
+        ));
+
     // Versioned v1 routes, one router per domain.
     let v1 = Router::new()
         .merge(events::routes())

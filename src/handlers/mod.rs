@@ -122,8 +122,10 @@ fn validate_jsonpath_expr(expr: &str) -> Result<(), AppError> {
         ));
     }
 
+    // The pattern is a compile-time constant; a failure here is a programming
+    // error, not input-dependent, so a documented panic is acceptable.
     let path_re = Regex::new(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\['[A-Za-z0-9_]+\'])*$")
-        .map_err(|e| AppError::Internal(format!("invalid JSONPath validator regex: {e}")))?;
+        .expect("JSONPath validator regex is a valid compile-time constant");
     if !path_re.is_match(expr) {
         return Err(AppError::Validation(
             "data_pattern must be a simple JSONPath expression like $.amount".to_string(),
@@ -167,7 +169,10 @@ async fn compress_gzip(input: &[u8]) -> Result<Vec<u8>, AppError> {
     async_compression::tokio::bufread::GzipEncoder::new(input)
         .read_to_end(&mut buf)
         .await
-        .map_err(|e| AppError::Internal(format!("gzip error: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "gzip compression failed");
+            AppError::Internal("internal server error".to_string())
+        })?;
     Ok(buf)
 }
 
@@ -178,7 +183,10 @@ async fn compress_brotli(input: &[u8]) -> Result<Vec<u8>, AppError> {
     async_compression::tokio::bufread::BrotliEncoder::new(input)
         .read_to_end(&mut buf)
         .await
-        .map_err(|e| AppError::Internal(format!("brotli error: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "brotli compression failed");
+            AppError::Internal("internal server error".to_string())
+        })?;
     Ok(buf)
 }
 
@@ -241,6 +249,7 @@ impl SubscriptionRateLimiter {
         let mut entry = self.hits.entry(ip.to_string()).or_default();
         entry.retain(|t| now.duration_since(*t) < self.window);
         if entry.len() >= self.limit {
+            // `entry.len() >= self.limit` and `limit >= 1` guarantee a first element.
             let oldest = entry.first().copied().unwrap_or(now);
             let elapsed = now.duration_since(oldest);
             let retry_after = self.window.saturating_sub(elapsed).as_secs().max(1);

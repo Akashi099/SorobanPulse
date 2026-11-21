@@ -27,6 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
+use tower_http::catch_panic::CatchPanicLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[cfg(feature = "otel")]
@@ -80,6 +81,82 @@ pub fn shutdown_telemetry() {
     global::shutdown_tracer_provider();
 }
 
+/// Issue #1434: install a process-wide panic hook that records a metric and
+/// logs the panic payload. Panics inside spawned tasks are otherwise swallowed
+/// silently, leaving subsystems dead while health checks still pass.
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            metrics::record_panic(info.location().map(|l| l.file()).unwrap_or("unknown"));
+            error!(
+                location = ?info.location(),
+                payload = %panic_payload(info),
+                "Panic caught — recording metric"
+            );
+            default_hook(info);
+        }));
+    });
+}
+
+/// Best-effort extraction of the panic payload as a string.
+fn panic_payload(info: &std::panic::PanicHookInfo<'_>) -> String {
+    if let Some(s) = info.payload().downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = info.payload().downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// Issue #1434: wrap a background task so that a panic is logged, counted and
+/// the task is restarted after a short backoff. The task is restarted until
+/// `shutdown_rx` observes a change (or the sender is dropped).
+pub fn supervise<F, Fut>(name: &'static str, shutdown_rx: tokio::sync::watch::Receiver<bool>, mut task: F)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut shutdown_rx = shutdown_rx;
+        loop {
+            let fut = task();
+            let handle = tokio::spawn(fut);
+            tokio::select! {
+                res = handle => {
+                    match res {
+                        Ok(()) => {
+                            info!(task = name, "Supervised task exited normally");
+                            break;
+                        }
+                        Err(join_err) if join_err.is_panic() => {
+                            metrics::record_task_restart(name);
+                            error!(task = name, "Supervised task panicked — restarting after backoff");
+                        }
+                        Err(join_err) => {
+                            error!(task = name, error = %join_err, "Supervised task failed — restarting after backoff");
+                            metrics::record_task_restart(name);
+                        }
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        _ = shutdown_rx.changed() => {
+                            info!(task = name, "Shutdown signalled — not restarting task");
+                            break;
+                        }
+                    }
+                }
+                _ = shutdown_rx.changed() => {
+                    info!(task = name, "Shutdown signalled — stopping supervised task");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 /// A fully wired application: a bound listener and the router to serve on it.
 pub struct App {
     pub listener: tokio::net::TcpListener,
@@ -131,6 +208,9 @@ impl AppBuilder {
 
     /// Wire every subsystem and bind the HTTP listener.
     pub async fn build(self) -> anyhow::Result<App> {
+        // Issue #1434: record panics as a metric before anything else starts.
+        install_panic_hook();
+
         // Initialize metrics exporter
         let prometheus_handle = metrics::init_metrics();
 
@@ -720,9 +800,17 @@ impl AppBuilder {
 
         let mut indexer_job_names = Vec::new();
         if config.role.runs_indexer() {
-            // Spawn the indexer background task.
-            jobs.spawn("indexer", async move {
-                indexer.run().await;
+            // Spawn the indexer background task under supervision so a panic is
+            // logged, counted and the loop restarted (issue #1434).
+            let indexer = Arc::new(tokio::sync::Mutex::new(indexer));
+            let indexer_for_task = indexer.clone();
+            let indexer_shutdown_rx = shutdown_rx.clone();
+            supervise("indexer", indexer_shutdown_rx, move || {
+                let indexer = indexer_for_task.clone();
+                async move {
+                    let mut guard = indexer.lock().await;
+                    guard.run().await;
+                }
             });
             tokio::spawn(rpc_latency_probe.run(shutdown_rx.clone()));
             indexer_job_names.push("indexer".to_string());
@@ -769,9 +857,21 @@ impl AppBuilder {
                 network_indexer.set_cost_calculator(cost_calculator.clone());
 
                 let job_name = format!("indexer:{}", target.chain_id);
-                jobs.spawn(job_name.clone(), async move {
-                    network_indexer.run().await;
-                });
+                let network_indexer = Arc::new(tokio::sync::Mutex::new(network_indexer));
+                let network_indexer_for_task = network_indexer.clone();
+                let network_shutdown_rx = shutdown_rx.clone();
+                let job_name_for_task = job_name.clone();
+                supervise(
+                    Box::leak(job_name_for_task.into_boxed_str()),
+                    network_shutdown_rx,
+                    move || {
+                        let network_indexer = network_indexer_for_task.clone();
+                        async move {
+                            let mut guard = network_indexer.lock().await;
+                            guard.run().await;
+                        }
+                    },
+                );
                 indexer_job_names.push(job_name);
             }
 
@@ -1046,6 +1146,18 @@ impl AppBuilder {
             )
         };
 
+        // Issue #1434: convert handler panics into 500 responses instead of
+        // aborting the connection / killing the task.
+        let router = router.layer(CatchPanicLayer::custom(
+            |_err: Box<dyn std::any::Any + Send + 'static>| {
+                metrics::record_panic("handler");
+                axum::response::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(axum::body::Body::from("Internal Server Error"))
+                    .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
+            },
+        ));
+
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
             error!(addr = %addr, "Address already in use");
             e
@@ -1064,5 +1176,64 @@ impl AppBuilder {
     pub async fn build_test(router: axum::Router) -> anyhow::Result<(tokio::net::TcpListener, axum::Router)> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
         Ok((listener, router))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+
+    async fn panicking_handler() -> &'static str {
+        panic!("intentional test panic");
+    }
+
+    async fn ok_handler() -> &'static str {
+        "ok"
+    }
+
+    /// Issue #1434: a panicking handler must yield a 500 and the server must
+    /// keep serving subsequent requests.
+    #[tokio::test]
+    async fn catch_panic_layer_returns_500_and_server_survives() {
+        install_panic_hook();
+
+        let app = axum::Router::new()
+            .route("/panic", get(panicking_handler))
+            .route("/ok", get(ok_handler))
+            .layer(CatchPanicLayer::custom(
+                |_err: Box<dyn std::any::Any + Send + 'static>| {
+                    axum::response::Response::builder()
+                        .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(axum::body::Body::from("Internal Server Error"))
+                        .unwrap_or_else(|_| {
+                            axum::response::Response::new(axum::body::Body::empty())
+                        })
+                },
+            ));
+
+        let (listener, app) = AppBuilder::build_test(app).await.expect("bind test listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let client = reqwest::Client::new();
+        let panic_resp = client
+            .get(format!("http://{addr}/panic"))
+            .send()
+            .await
+            .expect("panic request");
+        assert_eq!(panic_resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+
+        let ok_resp = client
+            .get(format!("http://{addr}/ok"))
+            .send()
+            .await
+            .expect("ok request");
+        assert_eq!(ok_resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(ok_resp.text().await.expect("body"), "ok");
+
+        server.abort();
     }
 }
