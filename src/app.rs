@@ -148,6 +148,37 @@ impl AppBuilder {
             eprintln!("Startup aborted due to configuration errors. Fix the above and restart.");
         })?;
 
+        // Issue #1430: API key digests are peppered HMAC-SHA256 values. The
+        // pepper is loaded from a secret and must be present whenever API key
+        // authentication is enabled; without it digests cannot be computed or
+        // verified, so we refuse to start rather than silently degrade.
+        let api_key_pepper = config.api_key_pepper.clone();
+        if config.api_keys.is_empty() {
+            if api_key_pepper.is_some() {
+                info!("API_KEY_PEPPER set but no API keys configured — auth disabled");
+            }
+        } else if api_key_pepper.is_none() {
+            error!(
+                "API_KEY_PEPPER is required when API keys are configured; refusing to start \
+                 (issue #1430)"
+            );
+            return Err(anyhow::anyhow!(
+                "API_KEY_PEPPER must be set when API keys are configured"
+            ));
+        }
+
+        // Issue #1432: only trust X-Forwarded-For / Forwarded when the TCP peer
+        // is one of the configured proxies. Parsed once at startup so a bad
+        // CIDR fails fast instead of silently trusting nothing.
+        let trusted_proxies = middleware::client_ip::TrustedProxies::from_config(&config)
+            .inspect_err(|e| {
+                error!(error = %e, "Invalid TRUSTED_PROXIES configuration");
+            })?;
+        info!(
+            trusted_proxies = trusted_proxies.len(),
+            "Client IP resolution configured"
+        );
+
         info!(
             rpc_url = %config.stellar_rpc_url,
             rpc_fallback_urls = ?config.stellar_rpc_fallback_urls,
@@ -988,6 +1019,7 @@ impl AppBuilder {
                 pool,
                 read_pool,
                 config.api_keys.clone(),
+                api_key_pepper.clone(),
                 &config.allowed_origins,
                 config.rate_limit_per_minute,
                 config.behind_proxy,
@@ -1020,6 +1052,13 @@ impl AppBuilder {
             )
         };
 
+        // Issue #1432: install the ClientIp extractor layer. It reads the TCP
+        // peer address from `ConnectInfo` and only honours forwarding headers
+        // when that peer is a trusted proxy, resolving the right-most untrusted
+        // hop. Audit logging, rate limiting, SSE per-IP limits and IP access
+        // control all consume the resolved `ClientIp` from request extensions.
+        let router = router.layer(axum::extract::connect_info::ConnectInfo::<SocketAddr>::into_make_service_with_connect_info::<SocketAddr>().into_layer(trusted_proxies.clone()));
+
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
             error!(addr = %addr, "Address already in use");
             e
@@ -1027,7 +1066,8 @@ impl AppBuilder {
 
         info!(
             behind_proxy = config.behind_proxy,
-            "Running server - trusting X-Forwarded-For"
+            trusted_proxies = trusted_proxies.len(),
+            "Running server - ClientIp extractor installed"
         );
 
         Ok(App { listener, router, shutdown_tx, shutdown_rx_axum, indexer_job_names, jobs })
