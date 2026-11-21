@@ -475,6 +475,9 @@ impl From<AuthError> for AppError {
     }
 }
 
+/// Type alias for API error (backward compatibility)
+pub type ApiError = AppError;
+
 // ---------------------------------------------------------------------------
 // Context attachment and standardized constructors
 // ---------------------------------------------------------------------------
