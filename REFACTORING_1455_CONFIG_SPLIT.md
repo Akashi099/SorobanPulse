@@ -84,74 +84,6 @@ src/config/
 3. Add module-level docs
 4. Verify no dead code
 
-## Target Structure Example
-
-```rust
-// src/config/mod.rs
-pub mod server;
-pub mod database;
-pub mod indexer;
-pub mod rpc;
-pub mod auth;
-pub mod streaming;
-pub mod notifications;
-pub mod saas;
-pub mod ml;
-pub mod observability;
-pub mod validation;
-
-pub use server::ServerConfig;
-pub use database::DatabaseConfig;
-// ... etc
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AppConfig {
-    pub server: ServerConfig,
-    pub database: DatabaseConfig,
-    pub indexer: IndexerConfig,
-    pub rpc: RpcClientConfig,
-    pub auth: AuthConfig,
-    pub streaming: StreamingConfig,
-    pub notifications: NotificationConfig,
-    pub saas: SaasConfig,
-    pub ml: MlConfig,
-    pub observability: ObservabilityConfig,
-}
-
-impl AppConfig {
-    pub fn load() -> Result<Self, ConfigError> {
-        let config = config::Config::builder()
-            .add_source(config::File::with_name("config/default"))
-            .add_source(config::Environment::with_prefix("APP"))
-            .build()?;
-        
-        let app_config = config.try_deserialize::<AppConfig>()?;
-        app_config.validate()?;
-        Ok(app_config)
-    }
-}
-
-impl validation::ValidateConfig for AppConfig {
-    fn validate(&self) -> Result<(), Vec<ValidationError>> {
-        let mut errors = vec![];
-        
-        if let Err(e) = self.server.validate() {
-            errors.extend(e);
-        }
-        if let Err(e) = self.database.validate() {
-            errors.extend(e);
-        }
-        // ... etc
-        
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
-    }
-}
-```
-
 ## Expected Outcomes
 
 ✅ Single Responsibility Principle per module  
@@ -161,49 +93,6 @@ impl validation::ValidateConfig for AppConfig {
 ✅ Reduced cognitive load per file  
 ✅ Clearer validation organization  
 ✅ Easier onboarding for new developers  
-
-## Testing Strategy
-
-Each domain config should have tests:
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn server_config_validates_port() {
-        let config = ServerConfig {
-            port: 65536, // invalid
-            ..default()
-        };
-        assert!(config.validate().is_err());
-    }
-    
-    #[test]
-    fn database_config_validates_pool_size() {
-        let config = DatabaseConfig {
-            max_connections: 0, // invalid
-            ..default()
-        };
-        assert!(config.validate().is_err());
-    }
-}
-```
-
-## Validation Consolidation
-
-Move from config_validation.rs to validation/:
-- validation/mod.rs - Validation trait definition
-- validation/server.rs - ServerConfig validation
-- validation/database.rs - DatabaseConfig validation
-- validation/indexer.rs - IndexerConfig validation
-- validation/rpc.rs - RpcClientConfig validation
-- validation/auth.rs - AuthConfig validation
-- validation/streaming.rs - StreamingConfig validation
-- validation/notifications.rs - NotificationConfig validation
-- validation/saas.rs - SaasConfig validation
-- validation/ml.rs - MlConfig validation
-- validation/observability.rs - ObservabilityConfig validation
 
 ## Checklist
 
@@ -217,21 +106,3 @@ Move from config_validation.rs to validation/:
 - [ ] Add module documentation
 - [ ] Verify no unused config fields
 - [ ] Performance test (config loading time)
-
-## Benefits Summary
-
-| Aspect | Before | After |
-|--------|--------|-------|
-| Config file size | 3,197 lines | ~300-400 per domain |
-| Validation location | Separate file | Per-domain |
-| Import clarity | Mixed domains | Domain-focused |
-| Test organization | 1 large test file | Per-domain tests |
-| Documentation | Unclear | Module-level docs |
-| Maintenance | High cognitive load | Clear ownership |
-
-## Related Issues
-
-This work coordinates with:
-- #1456 (handlers refactoring) - Config drives handler behavior
-- #1457 (indexer refactoring) - Heavy IndexerConfig user
-- #1458 (lib.rs cleanup) - Config exports will reduce public surface
