@@ -163,14 +163,21 @@ Real-time indexing and querying of Soroban smart contract events on the Stellar 
 
 ### Authentication
 
-Most endpoints are open. When the `API_KEY` environment variable is set, all routes except
-`/health` and `/healthz/*` require one of:
+Public query endpoints are open by default. When the `API_KEY` environment variable is set,
+all routes except `/health` and `/healthz/*` require one of:
 
 - `Authorization: Bearer <API_KEY>` header
 - `X-Api-Key: <API_KEY>` header
 
-Administrative endpoints under `/v1/admin/*` require `ADMIN_API_KEY` (independent of `API_KEY`).
-A missing key returns **401 Unauthorized**; a wrong key returns **403 Forbidden**.
+Administrative endpoints under `/v1/admin/*` are **fail-closed** and are never open, even when
+`API_KEY` is unset. They require either `ADMIN_API_KEY` (independent of `API_KEY`) or a
+database-backed API key carrying the `admin` scope. When no admin credential is configured,
+every `/v1/admin/*` request returns **403 Forbidden**. A missing key returns **401 Unauthorized**;
+a wrong key returns **403 Forbidden**.
+
+Unauthenticated admin access can only be enabled explicitly for local development via
+`ALLOW_UNAUTHENTICATED_ADMIN=true` (or `ADMIN_API_DISABLED=false`); this is refused when
+`ENVIRONMENT=production`.
 
 ---
 
@@ -566,9 +573,12 @@ pub fn create_router_with_tx_and_tenant_map(
     let replenish_ms = (60_000u64 / u64::from(rate_limit_per_minute.max(1))).max(1);
     let burst = rate_limit_per_minute.max(1);
 
-    // Admin routes (issue #409): gated by a dedicated admin auth layer in
-    // addition to the global auth layer. The admin layer requires an
-    // ADMIN_API_KEY even when no regular API_KEY is configured.
+    // Admin routes (issue #409, #1440): gated by a dedicated admin auth layer
+    // in addition to the global auth layer. The admin layer is fail-closed:
+    // it requires an ADMIN_API_KEY or a DB-backed key with `admin` scope even
+    // when no regular API_KEY is configured. With no admin credential
+    // configured, every /v1/admin/* request is rejected with 403 (unless
+    // unauthenticated admin access was explicitly enabled for local dev).
     let admin_routes = Router::new()
         .route("/admin/lua/preview", axum::routing::post(handlers::lua_preview))
         .route("/admin/replay", axum::routing::post(handlers::replay_events))

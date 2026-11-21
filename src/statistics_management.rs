@@ -535,9 +535,21 @@ pub async fn schedule_priority_analyze(
     Ok(schedules)
 }
 
-/// Set session-level parallel query parameters to improve performance for
-/// complex aggregation queries on the events table.
-pub async fn enable_parallel_query(pool: &PgPool) -> Result<(), ApiError> {
+/// Run a query with transaction-scoped parallel query parameters.
+///
+/// The parallel settings are applied with `set_config(name, value, true)`
+/// (equivalent to `SET LOCAL`) inside an explicit transaction, so they are
+/// automatically discarded when the transaction ends and the connection is
+/// returned to the pool. This prevents planner settings from leaking to
+/// unrelated requests that later check out the same pooled connection.
+pub async fn with_parallel_query<F, T>(pool: &PgPool, f: F) -> Result<T, ApiError>
+where
+    F: for<'c> FnOnce(
+        &'c mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ApiError>> + Send + 'c>,
+    >,
+{
     let settings = [
         ("max_parallel_workers_per_gather", "4"),
         ("parallel_tuple_cost", "0.1"),
@@ -545,22 +557,49 @@ pub async fn enable_parallel_query(pool: &PgPool) -> Result<(), ApiError> {
         ("min_parallel_table_scan_size", "1MB"),
     ];
 
-    let mut conn = pool
-        .acquire()
+    let mut tx = pool
+        .begin()
         .await
-        .map_err(|e| ApiError::BadRequest(format!("Could not acquire connection: {}", e)))?;
+        .map_err(|e| ApiError::BadRequest(format!("Could not begin transaction: {}", e)))?;
 
     for (key, val) in &settings {
-        let sql = format!("SET {} = '{}'", key, val);
-        sqlx::query(&sql)
-            .execute(&mut *conn)
+        // `set_config(..., true)` scopes the setting to the current transaction.
+        sqlx::query("SELECT set_config($1, $2, true)")
+            .bind(*key)
+            .bind(*val)
+            .execute(&mut *tx)
             .await
             .map_err(|e| {
-                ApiError::BadRequest(format!("Failed to SET {}: {}", key, e))
+                ApiError::BadRequest(format!("Failed to set {}: {}", key, e))
             })?;
     }
-    info!("Parallel query settings applied");
-    Ok(())
+
+    let result = f(&mut tx).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Could not commit transaction: {}", e)))?;
+
+    info!("Parallel query settings applied (transaction-scoped)");
+    Ok(result)
+}
+
+/// Apply parallel query settings for the duration of a single query and
+/// return its rows.
+///
+/// This is a convenience wrapper around [`with_parallel_query`] for callers
+/// that only need to run one statement with the parallel planner settings.
+pub async fn enable_parallel_query(pool: &PgPool) -> Result<(), ApiError> {
+    with_parallel_query(pool, |tx| {
+        Box::pin(async move {
+            // Touch the planner so the settings take effect for a real query.
+            sqlx::query("SELECT 1").execute(&mut **tx).await.map_err(|e| {
+                ApiError::BadRequest(format!("Parallel query probe failed: {}", e))
+            })?;
+            Ok(())
+        })
+    })
+    .await
 }
 
 /// Spawn a background task that runs auto-ANALYZE on a fixed interval and
@@ -776,5 +815,43 @@ mod tests {
         let pct = (stale_count as f64 / stale.len() as f64) * 100.0;
         let score = (100.0 - pct) as u32;
         assert_eq!(score, 0);
+    }
+
+    /// Proves that the parallel query settings do not persist on the pooled
+    /// connection after `enable_parallel_query` returns: a subsequent checkout
+    /// of the same connection must observe the server default.
+    #[sqlx::test]
+    async fn parallel_query_settings_do_not_leak_across_checkouts(pool: PgPool) {
+        // Capture the baseline value on a fresh checkout.
+        let baseline: String = sqlx::query_scalar(
+            "SELECT current_setting('max_parallel_workers_per_gather')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("baseline current_setting failed");
+
+        // Apply the settings via the transaction-scoped helper.
+        enable_parallel_query(&pool)
+            .await
+            .expect("enable_parallel_query failed");
+
+        // Re-check out a connection from the pool and verify the setting was
+        // discarded when the transaction ended.
+        let after: String = sqlx::query_scalar(
+            "SELECT current_setting('max_parallel_workers_per_gather')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("post-checkout current_setting failed");
+
+        assert_eq!(
+            after, baseline,
+            "parallel query setting leaked to a subsequent checkout: {} != {}",
+            after, baseline
+        );
+        assert_ne!(
+            after, "4",
+            "max_parallel_workers_per_gather should not persist as 4 after checkout"
+        );
     }
 }

@@ -40,6 +40,18 @@
 # API_KEY = ""
 # API_KEY_SECONDARY = ""
 
+# --- Admin API authentication (issue #1440) ---
+# Admin routes under /v1/admin/* fail closed: when no admin credential is
+# configured (no ADMIN_API_KEY and no DB-backed API key with the `admin`
+# scope), every admin request is rejected with 403 Forbidden.
+# Set ADMIN_API_KEY (ideally from a secret) to enable admin access.
+# ADMIN_API_KEY = ""
+# ADMIN_API_KEY_SECONDARY = ""
+#
+# Local development only: allow unauthenticated admin access. This is
+# refused at startup when ENVIRONMENT=production.
+# ALLOW_UNAUTHENTICATED_ADMIN = "false"
+
 # --- Web dashboard (issue #1112) ---
 # Serve the built dashboard at /ui (defaults to true in the Docker image).
 # SERVE_DASHBOARD = "false"

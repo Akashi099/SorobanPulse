@@ -77,6 +77,12 @@
 
 ---
 
+# Security
+
+- [Threat Model & Security Architecture](security/threat-model.md)
+
+---
+
 # Observability
 
 - [Logging](logging.md)
