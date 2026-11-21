@@ -1,3 +1,19 @@
+//! HTTP router assembly.
+//!
+//! Route registrations live in per-domain modules (Issue #1242):
+//!
+//! | Module          | Routes                                                         |
+//! |-----------------|----------------------------------------------------------------|
+//! | `events`        | Events, contracts, tokens/accounts, ledgers, analytics, export |
+//! | `subscriptions` | Subscriptions, their integrations and anomaly alerting         |
+//! | `webhooks`      | Notification channels, email tracking/bounces, suppression     |
+//! | `admin`         | `/admin/*` and runtime configuration                           |
+//! | `deprecated`    | Unversioned aliases of `/v1` routes                            |
+//! | `openapi`       | The OpenAPI document (`ApiDoc`)                                |
+//!
+//! This module owns application state and applies all cross-cutting
+//! middleware (auth, rate limiting, tracing, CORS, compression) in one place.
+
 use axum::extract::MatchedPath;
 use axum::http::{HeaderValue, Method, Request};
 use axum::{body::Body, routing::{get, post}, Router};
@@ -40,34 +56,6 @@ impl KeyExtractor for ApiKeyExtractor {
     }
 }
 
-pub async fn get_events_with_params(
-    State(state): State<AppState>,
-    Query(params): Query<crate::models::PaginationParams>,
-) -> Result<Json<crate::models::Paginated<Event>>, AppError> {
-    let response = handlers::get_events(
-        State(state),
-        Query(params),
-        axum::http::HeaderMap::new(),
-        axum::http::Extensions::new(),
-    )
-    .await?;
-
-    let payload = response.into_body();
-    let bytes = axum::body::to_bytes(payload, usize::MAX)
-        .await
-        .map_err(|e| crate::error::AppError::Internal(format!("failed to decode events response: {}", e)))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| crate::error::AppError::Internal(format!("failed to parse events response: {}", e)))?;
-    let records: Vec<Event> = serde_json::from_value(value["events"].clone())
-        .map_err(|e| crate::error::AppError::Internal(format!("failed to decode event records: {}", e)))?;
-    Ok(Json(crate::models::Paginated {
-        data: records,
-        page: value["page"].as_i64().unwrap_or(1),
-        limit: value["limit"].as_i64().unwrap_or(20),
-        total: value["total"].as_i64().unwrap_or(0),
-        has_more: value["has_more"].as_bool().unwrap_or(false),
-    }))
-}
 use tower_http::{
     cors::CorsLayer,
     limit::RequestBodyLimitLayer,
@@ -81,7 +69,7 @@ use crate::{
     aggregation, config::{Config, HealthState, IndexerState},
     handlers, metrics, middleware,
     models::SorobanEvent,
-    saved_queries, subscriptions,
+    saved_queries,
 };
 
 type ContractCountCache = moka::future::Cache<String, i64>;
@@ -149,178 +137,15 @@ pub struct AppState {
     pub serialization_cache: std::sync::Arc<crate::serialization_cache::SerializedEventCache>,
 }
 
-/// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
-#[derive(OpenApi)]
-#[openapi(
-    info(
-        title = "Soroban Pulse API",
-        version = "1.0.0",
-        description = "## Soroban Pulse API
+mod admin;
+mod deprecated;
+mod events;
+mod openapi;
+mod subscriptions;
+mod webhooks;
 
-Real-time indexing and querying of Soroban smart contract events on the Stellar network.
-
----
-
-### Authentication
-
-Public query endpoints are open by default. When the `API_KEY` environment variable is set,
-all routes except `/health` and `/healthz/*` require one of:
-
-- `Authorization: Bearer <API_KEY>` header
-- `X-Api-Key: <API_KEY>` header
-
-Administrative endpoints under `/v1/admin/*` are **fail-closed** and are never open, even when
-`API_KEY` is unset. They require either `ADMIN_API_KEY` (independent of `API_KEY`) or a
-database-backed API key carrying the `admin` scope. When no admin credential is configured,
-every `/v1/admin/*` request returns **403 Forbidden**. A missing key returns **401 Unauthorized**;
-a wrong key returns **403 Forbidden**.
-
-Unauthenticated admin access can only be enabled explicitly for local development via
-`ALLOW_UNAUTHENTICATED_ADMIN=true` (or `ADMIN_API_DISABLED=false`); this is refused when
-`ENVIRONMENT=production`.
-
----
-
-### Rate Limiting
-
-Default: **60 requests / minute per IP** (configurable via `RATE_LIMIT_PER_MINUTE`).
-Requests that exceed the limit receive **429 Too Many Requests** with a `Retry-After` header.
-Set `RATE_LIMIT_PER_MINUTE=0` to disable rate limiting entirely.
-
----
-
-### Guides & Resources
-
-- [Developer Onboarding](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/onboarding.md)
-- [API Usage Guide](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/api-guide.md)
-- [SDK Integration Guide](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sdk-integration-guide.md)
-- [Webhook Verification](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/webhook-verification.md)
-- [Contract Event Schemas](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/contract-event-schemas.md)"
-    ),
-    paths(
-        crate::job_scheduler::list_jobs,
-        crate::account_events::get_account_events,
-        crate::sep41::get_sep41_events,
-        handlers::health,
-        crate::meta::get_meta,
-        crate::contract_resource_stats::get_contract_resource_stats,
-        crate::api_keys::create_api_key,
-        crate::api_keys::list_api_keys,
-        crate::api_keys::revoke_api_key,
-        handlers::health_live,
-        handlers::health_ready,
-        handlers::health_postgres,
-        handlers::health_rpc,
-        handlers::health_external,
-        handlers::email_bounce_webhook,
-        handlers::get_cross_chain_trace,
-        handlers::analyze_causality,
-        handlers::get_feature_flag_status,
-        handlers::status,
-        handlers::get_events,
-        handlers::get_events_feed,
-        handlers::get_event_stats,
-        handlers::get_contract_stats_history,
-        handlers::get_events_diff,
-        handlers::export_events,
-        handlers::get_recent_events,
-        handlers::get_events_by_contract,
-        handlers::get_events_by_tx,
-        handlers::get_related_events_by_tx,
-        handlers::get_events_by_ledger_hash,
-        handlers::get_events_by_tx_batch,
-        handlers::stream_events,
-        handlers::stream_events_by_contract,
-        handlers::stream_events_multi,
-        handlers::ws_events,
-        handlers::ws_stream_events,
-        handlers::get_contracts,
-        handlers::replay_events,
-        handlers::replay_with_transform,
-        handlers::start_reencrypt,
-        handlers::register_contract_abi,
-        handlers::get_contract_abi,
-        handlers::upsert_contract_metadata,
-        handlers::get_contract_metadata,
-        crate::contract_tracker::get_contract,
-        crate::contract_specs::get_contract_spec,
-        handlers::anonymize_event,
-        handlers::pause_indexer,
-        handlers::resume_indexer,
-        handlers::list_archive,
-        handlers::query_archive,
-        handlers::restore_from_archive,
-        handlers::batch_query_events,
-        handlers::fulltext_search,
-        handlers::events_aggregations,
-        handlers::register_contract_schema,
-        handlers::get_contract_schema,
-        handlers::delete_contract_schema,
-        handlers::validate_event_data_against_schema,
-        handlers::list_contract_schemas,
-        handlers::start_mask_events,
-        handlers::get_mask_job_status,
-        handlers::get_timeseries,
-        handlers::get_contract_event_counts,
-        handlers::get_contract_summary,
-        handlers::get_contracts_search,
-        handlers::check_contract_exists,
-        handlers::get_config,
-        handlers::reload_config,
-        handlers::get_anonymization_config,
-        handlers::upsert_anonymization_rule,
-        handlers::delete_anonymization_rule,
-        handlers::scan_event_for_pii,
-        handlers::get_index_fragmentation,
-        handlers::reindex_index,
-    ),
-    components(schemas(
-        crate::models::Event,
-        crate::contract_metadata::ContractMetadata,
-        crate::contract_metadata::UpsertContractMetadata,
-        crate::models::EventType,
-        crate::models::SortOrder,
-        crate::models::PaginationParams,
-        crate::models::ContractSummary,
-        crate::contract_tracker::TrackedContract,
-        crate::models::ContractDetailSummary,
-        crate::models::LedgerRange,
-        crate::models::EventTypeBreakdown,
-        crate::models::ContractSearchResult,
-        crate::models::ContractSearchParams,
-        crate::models::ContractExistsResponse,
-        crate::models::ConfigResponse,
-        crate::models::ConfigReloadResponse,
-        crate::models::EventStats,
-        crate::models::ContractStatEntry,
-        crate::models::ReplayRequest,
-        crate::models::BatchTxRequest,
-        crate::models::ErrorResponse,
-        crate::models::DiffParams,
-        crate::models::ContractDiff,
-        crate::models::DiffResponse,
-        crate::models::MaskEventsRequest,
-        crate::models::MaskEventsResponse,
-        crate::models::MaskJobStatus,
-        crate::models::TimeseriesParams,
-        crate::models::TimeseriesBucket,
-        crate::models::TimeseriesResponse,
-        crate::error::ValidationErrorDetail,
-        crate::meta::MetaResponse,
-        crate::contract_resource_stats::ContractResourceStats,
-        crate::contract_resource_stats::ResourceAggregate,
-        crate::api_keys::ApiKeyScope,
-        crate::api_keys::CreateApiKeyRequest,
-        crate::api_keys::CreatedApiKey,
-        crate::api_keys::ApiKeyInfo,
-    )),
-    tags(
-        (name = "events", description = "Event indexing endpoints"),
-        (name = "system", description = "Health and observability endpoints"),
-        (name = "admin", description = "Administrative endpoints"),
-    )
-)]
-pub struct ApiDoc;
+pub use events::get_events_with_params;
+pub use openapi::ApiDoc;
 
 pub fn create_router(
     pool: PgPool,
@@ -640,232 +465,20 @@ pub fn create_router_with_tx_and_tenant_map(
             middleware::admin_auth_middleware,
         ));
 
-    // Versioned v1 routes
+    // Versioned v1 routes, one router per domain.
     let v1 = Router::new()
-        .route("/events", get(handlers::get_events))
-        .route("/events/feed.rss", get(handlers::get_events_feed))
-        .route("/events/stats", get(handlers::get_event_stats))
-        .route("/contracts/{contract_id}/stats/history", get(handlers::get_contract_stats_history))
-        // Issue #1257: per-contract resource and fee statistics.
-        .route("/contracts/{contract_id}/stats", get(crate::contract_resource_stats::get_contract_resource_stats))
-        .route("/events/diff", get(handlers::get_events_diff))
-        .route("/events/export", get(handlers::export_events))
-        .route("/events/timeseries", get(handlers::get_timeseries))
-        .route("/events/temporal", get(handlers::get_temporal_events))
-        .route("/events/recent", get(handlers::get_recent_events))
-        .route("/events/stream", get(handlers::stream_events))
-        .route("/events/stream/multi", get(handlers::stream_events_multi))
-        .route("/events/ws", get(handlers::ws_stream_events))
-        .route(
-            "/events/contract/{contract_id}",
-            get(handlers::get_events_by_contract),
-        )
-        .route(
-            "/events/contract/{contract_id}/stream",
-            get(handlers::stream_events_by_contract),
-        )
-        .route(
-            "/events/tx/batch",
-            axum::routing::post(handlers::get_events_by_tx_batch),
-        )
-        .route(
-            "/admin/events/bulk",
-            axum::routing::post(handlers::bulk_insert_events),
-        )
-        .route("/events/tx/{tx_hash}/related", get(handlers::get_related_events_by_tx))
-        .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
-        .route(
-            "/events/ledger-hash/{hash}",
-            get(handlers::get_events_by_ledger_hash),
-        )
-        .route("/contracts", get(handlers::get_contracts))
-        .route("/contracts/search", get(handlers::get_contracts_search))
-        .route("/contracts/exists", get(handlers::check_contract_exists))
-        .route("/config", get(handlers::get_config))
-        .route("/rate-limit/status", get(handlers::get_rate_limit_status))
-        .route("/admin/config/reload", axum::routing::post(handlers::reload_config))
-        .route("/config/anonymization", axum::routing::get(handlers::get_anonymization_config))
-        .route("/config/anonymization/rules", axum::routing::post(handlers::upsert_anonymization_rule))
-        .route("/config/anonymization/rules/{name}", axum::routing::delete(handlers::delete_anonymization_rule))
-        .route("/config/anonymization/scan", axum::routing::post(handlers::scan_event_for_pii))
-        .route("/cross-chain/trace/{tx_hash}", get(handlers::get_cross_chain_trace))
-        .route("/cross-chain/causality", get(handlers::analyze_causality))
-        .route("/contracts/{contract_id}/metadata", get(handlers::get_contract_metadata))
-        .route("/contracts/{contract_id}/summary", get(handlers::get_contract_summary))
-        .route("/contracts/{contract_id}/event-counts", get(handlers::get_contract_event_counts))
-        .route("/admin/replay", axum::routing::post(handlers::replay_events))
-        .route("/replay/with-transform", axum::routing::post(handlers::replay_with_transform))
-        .route("/admin/reencrypt", axum::routing::post(handlers::start_reencrypt))
-        .route("/admin/mask-events", axum::routing::post(handlers::start_mask_events))
-        .route("/admin/mask-events/{job_id}", get(handlers::get_mask_job_status))
-        .route("/admin/notifications/channels", axum::routing::post(handlers::create_notification_channel))
-        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi).get(handlers::get_contract_abi))
-        .route("/admin/contracts/{contract_id}/metadata", axum::routing::post(handlers::upsert_contract_metadata).delete(handlers::delete_contract_metadata))
-        .route("/admin/contracts/metadata/import", axum::routing::post(handlers::bulk_import_contract_metadata))
-        .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
-        .route("/admin/events/contract/{contract_id}", axum::routing::delete(handlers::delete_contract_events))
-        .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
-        .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
-        .route("/admin/contracts/{contract_id}/schema", axum::routing::post(handlers::register_contract_schema).get(handlers::get_contract_schema).delete(handlers::delete_contract_schema))
-        .route("/admin/contracts/{contract_id}/validate", axum::routing::post(handlers::validate_event_data_against_schema))
-        .route("/admin/schemas", axum::routing::get(handlers::list_contract_schemas))
-        .route("/notifications/email/bounce", axum::routing::post(handlers::email_bounce_webhook))
-        .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
-        .route("/subscriptions/{id}", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
-        .route("/subscriptions/{id}/ack", axum::routing::post(subscriptions::ack_subscription))
-        // Issue #619: Email notification config for subscriptions
-        .route("/subscriptions/{id}/email", get(subscriptions::get_subscription_email).put(subscriptions::update_subscription_email))
-        // Issue #620: Push notification config for subscriptions
-        .route("/subscriptions/{id}/push", get(crate::push_notification::get_subscription_push).put(crate::push_notification::update_subscription_push))
-        // Issue #839: Push notification preferences
-        .route("/subscriptions/{id}/push/preferences", get(crate::push_notification::get_notification_preferences).put(crate::push_notification::update_notification_preferences))
-        // Issue #628: Batch subscription config and delivery
-        .route("/subscriptions/{id}/batch", get(subscriptions::get_subscription_batch_config).put(subscriptions::update_subscription_batch_config).post(subscriptions::deliver_batch))
-        // Issue #884: Subscription pause/resume
-        .route("/subscriptions/{id}/pause", axum::routing::post(subscriptions::pause_subscription))
-        .route("/subscriptions/{id}/resume", axum::routing::post(subscriptions::resume_subscription))
-        .route("/subscriptions/{id}/pause-status", get(subscriptions::get_pause_resume_status))
-        // Issue #882: Anomaly detection alerting
-        .route("/admin/subscriptions/{subscription_id}/anomaly-config", axum::routing::post(handlers::create_anomaly_config))
-        .route("/admin/subscriptions/{subscription_id}/anomaly-alerts", get(handlers::get_anomaly_alerts))
-        .route("/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge", axum::routing::post(handlers::acknowledge_anomaly_alert))
-        // Issue #674: GitHub integration
-        .route("/subscriptions/{id}/integrations/github", axum::routing::post(crate::integration_handlers::setup_github_integration).get(crate::integration_handlers::get_github_integration).delete(crate::integration_handlers::delete_github_integration))
-        // Issue #675: Discord integration
-        .route("/subscriptions/{id}/integrations/discord", axum::routing::post(crate::integration_handlers::setup_discord_integration).get(crate::integration_handlers::get_discord_integration).delete(crate::integration_handlers::delete_discord_integration))
-        // Issue #1348: Microsoft Teams integration
-        .route("/subscriptions/{id}/integrations/teams", axum::routing::post(crate::integration_handlers::setup_teams_integration).get(crate::integration_handlers::get_teams_integration).delete(crate::integration_handlers::delete_teams_integration))
-        .route("/subscriptions/{id}/test", axum::routing::post(crate::integration_handlers::test_subscription_integrations))
-        // Issue #676: Slack integration
-        .route("/subscriptions/{id}/integrations/slack", axum::routing::post(crate::integration_handlers::setup_slack_integration).get(crate::integration_handlers::get_slack_integration).delete(crate::integration_handlers::delete_slack_integration))
-        // Issue #677: Telegram integration
-        .route("/subscriptions/{id}/integrations/telegram", axum::routing::post(crate::integration_handlers::setup_telegram_integration).get(crate::integration_handlers::get_telegram_integration).delete(crate::integration_handlers::delete_telegram_integration))
-        // Issue #951: PagerDuty integration
-        .route("/subscriptions/{id}/integrations/pagerduty", axum::routing::post(crate::integration_handlers::setup_pagerduty_integration).get(crate::integration_handlers::get_pagerduty_integration).delete(crate::integration_handlers::delete_pagerduty_integration))
-        .route("/subscriptions/{id}/integrations/pagerduty/incidents", axum::routing::get(crate::integration_handlers::list_pagerduty_incidents))
-        .route("/subscriptions/{id}/integrations/pagerduty/incidents/acknowledge", axum::routing::post(crate::integration_handlers::acknowledge_pagerduty_incident))
-        .route("/subscriptions/{id}/integrations/pagerduty/incidents/resolve", axum::routing::post(crate::integration_handlers::resolve_pagerduty_incident))
-        // Issue #487: email open tracking (public – email clients fetch the pixel)
-        .route("/notifications/email/track/{token}", get(handlers::track_email_open))
-        // Issue #487: email open stats (admin)
-        .route("/admin/notifications/email/stats", get(handlers::get_email_stats))
-        // Issue #488: email click tracking (public – email link redirect)
-        .route("/notifications/email/click/{token}", get(handlers::track_email_click))
-        // Issue #489: A/B test results (admin)
-        .route("/admin/notifications/email/ab-test/results", get(handlers::get_ab_test_results))
-        // Issue #490: suppression list management (admin)
-        .route("/admin/notifications/suppress", axum::routing::post(handlers::add_suppression))
-        .route("/admin/notifications/suppress/{id}", axum::routing::delete(handlers::remove_suppression))
-        // #586: Replica sync monitoring
-        .route("/admin/replication/status", axum::routing::get(handlers::get_replication_status))
-        // #587: Feature flag management
-        .route("/admin/feature-flags", axum::routing::get(handlers::list_feature_flags))
-        .route("/admin/feature-flags/audit", axum::routing::get(handlers::get_feature_flag_audit))
-        // #694: Index fragmentation monitoring
-        .route("/admin/indexes/fragmentation", axum::routing::get(handlers::get_index_fragmentation))
-        .route("/admin/indexes/{index_name}/reindex", axum::routing::post(handlers::reindex_index))
-        // Issue #609: Multi-chain networks
-        .route("/networks", axum::routing::get(handlers::list_networks))
-        // Issue #608: Ledger hash endpoints
-        .route("/ledgers/{ledger}/hash", axum::routing::get(handlers::get_ledger_hash))
-        .route("/ledgers/verify-chain", axum::routing::get(handlers::verify_ledger_hash_chain))
-        // Issue #610: Compression admin endpoints
-        .route("/admin/compression/stats", axum::routing::get(handlers::compression_stats))
-        .route("/admin/compression/migrate", axum::routing::post(handlers::start_compression_migration))
-        .route("/tokens/{contract_id}/transfers", axum::routing::get(crate::token_events::get_token_transfers))
-        .route("/accounts/{address}/events", axum::routing::get(crate::account_events::get_account_events))
-        .route("/events/sep41", axum::routing::get(crate::sep41::get_sep41_events))
-        .route("/contracts/{contract_id}/versions", axum::routing::get(crate::contract_versions::get_contract_versions))
-        // Issue #1255: deployment record (deployer, WASM hash, label)
-        .route("/contracts/{contract_id}", axum::routing::get(crate::contract_tracker::get_contract))
-        // Issue #1253: contract spec auto-fetched from on-chain WASM
-        .route("/contracts/{contract_id}/spec", axum::routing::get(crate::contract_specs::get_contract_spec))
-        // Issue #607: Cached ABI endpoint
-        .route("/contracts/{contract_id}/abi/cached", axum::routing::get(handlers::get_contract_abi_cached))
-        // Issue #632: Feature flag client-side endpoint
-        .route("/features", axum::routing::get(handlers::get_feature_flag_status))
-        // Issue #670: Audit log query endpoint (admin)
-        .route("/admin/audit-logs", axum::routing::get(handlers::get_audit_logs))
-        // Issue #671: Trending analytics
-        .route("/analytics/trending", axum::routing::get(handlers::get_trending_events))
-        // Issue #672: Event correlation analysis
-        .route("/analytics/correlations", axum::routing::get(handlers::get_event_correlations))
-        // Issue #673: Dedicated export endpoints
-        .route("/export/csv", axum::routing::get(handlers::export_events_csv))
-        .route("/export/json", axum::routing::get(handlers::export_events_json))
-        .route("/export/parquet", axum::routing::get(handlers::export_events_parquet))
-        .route("/export/schedule", axum::routing::post(handlers::schedule_export_job))
-        .route("/export/jobs/{job_id}", axum::routing::get(handlers::get_export_job_status_db))
-        .route("/export/history", axum::routing::get(handlers::get_export_history))
-        // Push-preload endpoints: read-only schema/ABI lookup for HTTP/2 push
-        // and client-side preloading. Gated by enable_push_preload at the
-        // handler level so the routes are always registered (returning 501 when
-        // the flag is off) to keep the routing table stable.
-        .route(
-            "/push/{contract_id}/schema",
-            axum::routing::get(crate::push_preload::get_push_schema),
-        )
-        .route(
-            "/push/{contract_id}/abi",
-            axum::routing::get(crate::push_preload::get_push_abi),
-        )
-        // Issue #931: Batch event operations
-        .route("/events/batch/retrieve", axum::routing::post(crate::batch_operations::batch_retrieve_events))
-        .route("/events/batch/delete", axum::routing::post(crate::batch_operations::batch_delete_events))
-        .route("/events/batch/tag", axum::routing::post(crate::batch_operations::batch_tag_events))
-        .route("/events/batch/subscriptions", axum::routing::post(crate::batch_operations::batch_update_subscriptions))
-        .route("/events/batch/transform", axum::routing::post(crate::batch_operations::batch_transform_events))
-        .route("/events/batch/progress/{job_id}", axum::routing::get(crate::batch_operations::get_batch_progress))
-        // Issue #929: Real-time event stream statistics
-        .route("/stats/stream", axum::routing::get(crate::stream_statistics::get_stream_stats))
-        .route("/stats/stream/throughput", axum::routing::get(crate::stream_statistics::get_stream_throughput))
-        .route("/stats/stream/{contract_id}", axum::routing::get(crate::stream_statistics::get_contract_stream_stats))
-        // Issue #928: Event filtering DSL
-        .route("/events/filter", axum::routing::post(crate::filter_dsl::get_events_with_dsl))
-        .route("/admin/dsl/compile", axum::routing::post(crate::filter_dsl::compile_dsl_filter))
-        .route("/admin/dsl/filters", axum::routing::post(crate::filter_dsl::save_dsl_filter).get(crate::filter_dsl::list_dsl_filters))
+        .merge(events::routes())
+        .merge(subscriptions::routes())
+        .merge(webhooks::routes())
+        .merge(admin::routes())
         // Append Link preload headers to responses for
         // /v1/events/contract/{contract_id} when the feature flag is on.
         .route_layer(axum::middleware::from_fn_with_state(
             push_preload_state,
             crate::push_preload::push_link_header_middleware,
-        ));
-
-
-    // Issue #1258: scoped API key management. Always requires an admin
-    // credential, even when ADMIN_API_KEY is unset.
-    let api_key_routes = Router::new()
-        .route(
-            "/admin/api-keys",
-            post(crate::api_keys::create_api_key).get(crate::api_keys::list_api_keys),
-        )
-        .route(
-            "/admin/api-keys/{id}",
-            axum::routing::delete(crate::api_keys::revoke_api_key),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&admin_auth_state),
-            middleware::require_admin_middleware,
-        ));
-    let v1 = v1.merge(api_key_routes);
-
-    // Unversioned deprecated aliases (same handlers, add Deprecation header via middleware)
-    let deprecated = Router::new()
-        .route("/events", get(handlers::get_events))
-        .route("/events/stream", get(handlers::stream_events))
-        .route(
-            "/events/contract/{contract_id}",
-            get(handlers::get_events_by_contract),
-        )
-        .route(
-            "/events/contract/{contract_id}/stream",
-            get(handlers::stream_events_by_contract),
-        )
-        .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
-        .route("/contracts", get(handlers::get_contracts))
-        .layer(axum::middleware::from_fn(
-            middleware::deprecation_middleware,
-        ));
+        ))
+        // Merged after the push-preload route_layer, so that layer does not wrap these.
+        .merge(admin::api_key_routes(admin_auth_state));
 
     // Health endpoints — exempt from rate limiting.
     // The unsubscribe endpoint is public (reached from email links) and must
@@ -883,6 +496,37 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/v1/meta", get(crate::meta::get_meta));
 
     // All other routes — subject to rate limiting.
+    let api_routes = Router::new()
+        .route("/status", get(handlers::status))
+        .route("/openapi.json", get(handlers::openapi_json))
+        .route("/docs", get(handlers::swagger_ui))
+        .merge(graphql_routes())
+        .nest("/v1", v1)
+        .merge(deprecated::routes());
+
+    // Apply the governor rate limiter keyed by `$extractor`. A macro rather
+    // than a function because each extractor yields a distinct layer type.
+    macro_rules! rate_limited {
+        ($routes:ident, $replenish_ms:expr, $burst:expr, $extractor:expr) => {
+            match GovernorConfigBuilder::default()
+                .per_millisecond($replenish_ms)
+                .burst_size($burst)
+                .key_extractor($extractor)
+                .use_headers()
+                .finish()
+            {
+                Some(conf) => $routes
+                    .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
+                    .layer(GovernorLayer::new(Arc::new(conf))),
+                // Unreachable with the clamped period/burst above; never panic at startup.
+                None => {
+                    tracing::error!("Invalid rate limiter configuration; IP rate limiting disabled");
+                    $routes
+                }
+            }
+        };
+    }
+
     let rate_limited_routes = if config.multi_tenant {
         // In multi-tenant mode rate-limit per API key so each tenant has an
         // independent quota regardless of IP (tenants may share egress IPs).
@@ -891,77 +535,11 @@ pub fn create_router_with_tx_and_tenant_map(
             .unwrap_or(rate_limit_per_minute);
         let replenish_ms_t = (60_000u64 / u64::from(effective_limit.max(1))).max(1);
         let burst_t = effective_limit.max(1);
-        let routes = Router::new()
-            .route("/status", get(handlers::status))
-            .route("/openapi.json", get(handlers::openapi_json))
-            .route("/docs", get(handlers::swagger_ui))
-            .merge(graphql_routes())
-            .nest("/v1", v1)
-            .merge(deprecated);
-        match GovernorConfigBuilder::default()
-            .per_millisecond(replenish_ms_t)
-            .burst_size(burst_t)
-            .key_extractor(ApiKeyExtractor)
-            .use_headers()
-            .finish()
-        {
-            Some(conf) => routes
-                .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
-                .layer(GovernorLayer::new(Arc::new(conf))),
-            // Unreachable with the clamped period/burst above; never panic at startup.
-            None => {
-                tracing::error!("Invalid rate limiter configuration; IP rate limiting disabled");
-                routes
-            }
-        }
+        rate_limited!(api_routes, replenish_ms_t, burst_t, ApiKeyExtractor)
     } else if behind_proxy {
-        let routes = Router::new()
-            .route("/status", get(handlers::status))
-            .route("/openapi.json", get(handlers::openapi_json))
-            .route("/docs", get(handlers::swagger_ui))
-            .merge(graphql_routes())
-            .nest("/v1", v1)
-            .merge(deprecated);
-        match GovernorConfigBuilder::default()
-            .per_millisecond(replenish_ms)
-            .burst_size(burst)
-            .key_extractor(SmartIpKeyExtractor)
-            .use_headers()
-            .finish()
-        {
-            Some(conf) => routes
-                .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
-                .layer(GovernorLayer::new(Arc::new(conf))),
-            // Unreachable with the clamped period/burst above; never panic at startup.
-            None => {
-                tracing::error!("Invalid rate limiter configuration; IP rate limiting disabled");
-                routes
-            }
-        }
+        rate_limited!(api_routes, replenish_ms, burst, SmartIpKeyExtractor)
     } else {
-        let routes = Router::new()
-            .route("/status", get(handlers::status))
-            .route("/openapi.json", get(handlers::openapi_json))
-            .route("/docs", get(handlers::swagger_ui))
-            .merge(graphql_routes())
-            .nest("/v1", v1)
-            .merge(deprecated);
-        match GovernorConfigBuilder::default()
-            .per_millisecond(replenish_ms)
-            .burst_size(burst)
-            .key_extractor(PeerIpKeyExtractor)
-            .use_headers()
-            .finish()
-        {
-            Some(conf) => routes
-                .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
-                .layer(GovernorLayer::new(Arc::new(conf))),
-            // Unreachable with the clamped period/burst above; never panic at startup.
-            None => {
-                tracing::error!("Invalid rate limiter configuration; IP rate limiting disabled");
-                routes
-            }
-        }
+        rate_limited!(api_routes, replenish_ms, burst, PeerIpKeyExtractor)
     };
 
     // Issue #1112: static dashboard at /ui — outside auth-gated rate limiting.
