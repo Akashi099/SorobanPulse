@@ -7,7 +7,7 @@
 //! - [`AdminAuthState`] — shared state for the admin-only layer.
 //! - [`admin_auth_middleware`] — gates `/v1/admin/*` endpoints.
 //! - [`TenantId`] — request extension carrying the resolved tenant.
-//! - [`hash_api_key`] — SHA-256 hex digest helper.
+//! - [`hash_api_key`] — peppered HMAC-SHA256 hex digest helper.
 //! - [`require_admin_middleware`] — strict admin gate for key management.
 //!
 //! ## Fail-closed admin authentication (issue #1440)
@@ -30,6 +30,22 @@
 //! (see [`crate::api_keys::required_scope`]). Unknown or revoked `sp_` keys
 //! fall through to the legacy env-var key check, which keeps working
 //! unchanged for backward compatibility.
+//!
+//! ## Peppered key digests (issue #1430)
+//!
+//! Key digests are HMAC-SHA256 over the raw key, keyed by the server-side
+//! `API_KEY_PEPPER` secret (see [`crate::hmac_util::hmac_sha256`]). Only the
+//! digest is ever persisted or held in the tenant map; the raw key is never
+//! stored. Digests produced by the previous scheme (bare SHA-256, or an older
+//! pepper) are still accepted and are transparently rewritten with the
+//! current pepper on the next successful use — see [`verify_and_upgrade`].
+//!
+//! ## SaaS tenant keys (issue #1429)
+//!
+//! Tenant keys live in the unified `api_keys` table (hashed, with `tenant_id`,
+//! scopes and revocation). The legacy plaintext `saas_tenants.api_keys`
+//! column is no longer read anywhere; tenant resolution goes through the
+//! hashed-key lookup.
 
 use axum::{
     extract::{Request, State},
@@ -38,7 +54,6 @@ use axum::{
     response::Response,
     Json,
 };
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
@@ -225,12 +240,75 @@ pub(crate) fn extract_api_key(req: &Request) -> Option<&str> {
     bearer.or(x_api_key)
 }
 
-/// SHA-256 hex digest of a raw API key — used as the lookup key in
-/// `tenant_map` so plain-text keys are never stored in memory after hashing.
+/// The pepper used for key digests, read from `API_KEY_PEPPER`.
+///
+/// Returns `None` when the variable is unset or empty, in which case digests
+/// fall back to the legacy bare SHA-256 scheme (kept only for backward
+/// compatibility; deployments should always set a pepper).
+pub fn api_key_pepper() -> Option<String> {
+    std::env::var("API_KEY_PEPPER")
+        .ok()
+        .filter(|p| !p.is_empty())
+}
+
+/// Peppered HMAC-SHA256 hex digest of a raw API key — used as the lookup key
+/// in `tenant_map` and the `api_keys` table. Only the digest is ever stored;
+/// the raw key is never persisted.
+///
+/// Uses `API_KEY_PEPPER` as the HMAC key. When no pepper is configured the
+/// legacy bare SHA-256 digest is produced so existing deployments keep
+/// working; [`verify_and_upgrade`] rewrites such digests once a pepper is set.
 pub fn hash_api_key(key: &str) -> String {
+    match api_key_pepper() {
+        Some(pepper) => hash_api_key_with_pepper(key, &pepper),
+        None => legacy_sha256(key),
+    }
+}
+
+/// Peppered HMAC-SHA256 hex digest of `key` using an explicit `pepper`.
+///
+/// Exposed for the one-time migration that re-hashes existing digests and for
+/// tests that exercise pepper rotation.
+pub fn hash_api_key_with_pepper(key: &str, pepper: &str) -> String {
+    crate::hmac_util::hmac_sha256(pepper.as_bytes(), key.as_bytes())
+}
+
+/// Legacy bare SHA-256 hex digest, retained only to verify digests written
+/// before peppering was introduced.
+pub fn legacy_sha256(key: &str) -> String {
+    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(key.as_bytes());
     format!("{:x}", h.finalize())
+}
+
+/// Verify `key` against a stored `digest`, accepting digests produced with the
+/// current pepper, a previous pepper, or the legacy bare SHA-256 scheme.
+///
+/// Returns `Some(current_digest)` when the key matches and the stored digest
+/// was produced with an outdated scheme, so the caller can rewrite it with the
+/// current pepper. Returns `Some(digest)` unchanged when already current, and
+/// `None` when the key does not match.
+pub fn verify_and_upgrade(
+    key: &str,
+    stored_digest: &str,
+    previous_peppers: &[String],
+) -> Option<String> {
+    let current = hash_api_key(key);
+    let matches: bool = current.as_bytes().ct_eq(stored_digest.as_bytes()).into();
+    if matches {
+        return Some(current);
+    }
+    // Accept digests from previous peppers or the legacy bare SHA-256 scheme.
+    let legacy_ok = previous_peppers
+        .iter()
+        .any(|p| hash_api_key_with_pepper(key, p) == stored_digest)
+        || legacy_sha256(key) == stored_digest;
+    if legacy_ok {
+        Some(current)
+    } else {
+        None
+    }
 }
 
 /// Paths that never require authentication.
@@ -774,5 +852,12 @@ mod principal_tests {
         assert_ne!(Principal::from_api_key("a"), Principal::from_api_key("b"));
         assert_eq!(Principal::from_api_key("a"), Principal::from_api_key("a"));
         assert_eq!(Principal::anonymous().0, "anonymous");
+    }
+
+    #[test]
+    fn principal_is_derived_from_peppered_digest() {
+        let p = Principal::from_api_key("a");
+        let expected = format!("key:{}", &super::hash_api_key("a")[..16]);
+        assert_eq!(p.0, expected);
     }
 }

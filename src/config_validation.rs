@@ -204,25 +204,55 @@ fn check_pool_sizing(report: &mut ConfigValidationReport, cfg: &Config) {
     }
 }
 
+/// Minimum length (in bytes) for operator-supplied API keys and for the
+/// server-side pepper used to HMAC key digests (issue #1430).
+const MIN_API_KEY_LEN: usize = 32;
+
 fn check_auth(report: &mut ConfigValidationReport, cfg: &Config) {
     use secrecy::ExposeSecret;
 
-    // Warn about short API keys.
-    for key in &cfg.api_keys {
-        if key.expose_secret().len() < 32 {
-            report.add_warning(
-                "API_KEY is shorter than 32 characters — use a cryptographically random key of at least 32 characters",
+    // Issue #1430: short operator-supplied keys are brute-forceable offline
+    // from leaked digests, so reject them in production-like environments and
+    // warn elsewhere.
+    let strict = cfg.environment.is_production_like();
+    let mut check_key = |report: &mut ConfigValidationReport, name: &str, key: &str| {
+        if key.len() < MIN_API_KEY_LEN {
+            let msg = format!(
+                "{name} is shorter than {MIN_API_KEY_LEN} characters — use a cryptographically \
+                 random key of at least {MIN_API_KEY_LEN} characters"
             );
-            break;
+            if strict {
+                report.add_error(msg);
+            } else {
+                report.add_warning(msg);
+            }
         }
+    };
+
+    for key in &cfg.api_keys {
+        check_key(report, "API_KEY", key.expose_secret());
     }
     for key in &cfg.admin_api_keys {
-        if key.expose_secret().len() < 32 {
-            report.add_warning(
-                "ADMIN_API_KEY is shorter than 32 characters — admin keys should be strong",
-            );
-            break;
+        check_key(report, "ADMIN_API_KEY", key.expose_secret());
+    }
+
+    // Issue #1430: key digests are peppered HMACs; without the pepper they
+    // cannot be computed, so require it whenever any key is configured.
+    let any_key_configured =
+        !cfg.api_keys.is_empty() || !cfg.admin_api_keys.is_empty();
+    match cfg.api_key_pepper.as_ref().map(|p| p.expose_secret()) {
+        Some(pepper) if pepper.len() < MIN_API_KEY_LEN => {
+            report.add_error(format!(
+                "API_KEY_PEPPER must be at least {MIN_API_KEY_LEN} bytes — it peppers API key digests"
+            ));
         }
+        None if any_key_configured => {
+            report.add_error(
+                "API_KEY_PEPPER must be set when API_KEY or ADMIN_API_KEY is configured — \
+                 key digests are peppered HMAC-SHA256 values",
+            );
+        }
+        _ => {}
     }
 
     // Production without any auth key is suspicious.
@@ -235,6 +265,7 @@ fn check_auth(report: &mut ConfigValidationReport, cfg: &Config) {
         );
     }
 }
+=======
 
 fn check_webhook(report: &mut ConfigValidationReport, cfg: &Config) {
     if let Some(ref url) = cfg.webhook_url {
@@ -556,6 +587,20 @@ pub fn config_schema() -> Vec<ConfigFieldDoc> {
             required: false,
             category: "auth",
         },
+        ConfigFieldDoc {
+            env_var: "API_KEY_PEPPER",
+            description: "Server-side pepper (≥32 bytes) used to HMAC-SHA256 API key digests; required when any API key is configured",
+            default: None,
+            required: false,
+            category: "auth",
+        },
+        ConfigFieldDoc {
+            env_var: "TRUSTED_PROXIES",
+            description: "Comma-separated CIDRs of trusted reverse proxies; X-Forwarded-For is only honoured from these peers",
+            default: None,
+            required: false,
+            category: "server",
+        },
         // ── Server ───────────────────────────────────────────────────────
         ConfigFieldDoc {
             env_var: "PORT",
@@ -860,5 +905,57 @@ mod tests {
     fn report_log_does_not_panic_on_empty_report() {
         let report = ConfigValidationReport::default();
         report.log(); // should not panic
+    }
+
+    #[test]
+    fn short_api_key_is_a_warning_in_development() {
+        use secrecy::SecretString;
+        let mut cfg = base_config();
+        cfg.api_keys = vec![SecretString::from("short".to_string())];
+        cfg.api_key_pepper = Some(SecretString::from("p".repeat(32)));
+        let report = validate(&cfg);
+        assert!(report.is_ok(), "short key should only warn outside production");
+        assert!(report.warnings.iter().any(|w| w.contains("API_KEY")));
+    }
+
+    #[test]
+    fn short_api_key_is_an_error_in_production() {
+        use secrecy::SecretString;
+        let mut cfg = base_config();
+        cfg.environment = crate::config::Environment::Production;
+        cfg.api_keys = vec![SecretString::from("short".to_string())];
+        cfg.api_key_pepper = Some(SecretString::from("p".repeat(32)));
+        let report = validate(&cfg);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.contains("API_KEY")));
+    }
+
+    #[test]
+    fn missing_pepper_with_api_key_is_an_error() {
+        use secrecy::SecretString;
+        let mut cfg = base_config();
+        cfg.api_keys = vec![SecretString::from("k".repeat(32))];
+        cfg.api_key_pepper = None;
+        let report = validate(&cfg);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.contains("API_KEY_PEPPER")));
+    }
+
+    #[test]
+    fn short_pepper_is_an_error() {
+        use secrecy::SecretString;
+        let mut cfg = base_config();
+        cfg.api_keys = vec![SecretString::from("k".repeat(32))];
+        cfg.api_key_pepper = Some(SecretString::from("p".repeat(8)));
+        let report = validate(&cfg);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.contains("API_KEY_PEPPER")));
+    }
+
+    #[test]
+    fn config_schema_documents_pepper_and_trusted_proxies() {
+        let schema = config_schema();
+        assert!(schema.iter().any(|f| f.env_var == "API_KEY_PEPPER"));
+        assert!(schema.iter().any(|f| f.env_var == "TRUSTED_PROXIES"));
     }
 }

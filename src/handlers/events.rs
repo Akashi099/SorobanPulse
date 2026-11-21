@@ -3211,7 +3211,7 @@ pub async fn delete_contract_events(
     State(state): State<AppState>,
     Path(contract_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    headers: axum::http::HeaderMap,
+    client_ip: crate::middleware::client_ip::ClientIp,
 ) -> Result<Json<Value>, AppError> {
     validate_contract_id(&contract_id)?;
 
@@ -3220,10 +3220,10 @@ pub async fn delete_contract_events(
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
 
-    let client_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("unknown");
+    // Verified client IP: X-Forwarded-For is only honoured when the TCP peer is a
+    // configured trusted proxy, and the right-most untrusted hop is used. Never
+    // trust the raw header here, otherwise audit records can be falsified.
+    let client_ip = client_ip.as_str();
 
     if anonymize_only {
         // Anonymize: set anonymized=true and hash tx_hash
