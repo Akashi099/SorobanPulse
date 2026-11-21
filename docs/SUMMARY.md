@@ -17,6 +17,7 @@
 
 # API Reference
 
+- [Generated API Reference](api-reference.md)
 - [API Usage](api-usage.md)
 - [API Versioning](api-versioning.md)
   - [Migrating unversioned routes to /v1/](migration-unversioned-to-v1.md)
@@ -77,6 +78,12 @@
 
 ---
 
+# Security
+
+- [Threat Model & Security Architecture](security/threat-model.md)
+
+---
+
 # Observability
 
 - [Logging](logging.md)
@@ -116,6 +123,24 @@
 # Infrastructure
 
 - [Terraform](terraform.md)
+- [CI Workflows Overview](development/ci.md)
+
+---
+
+# Architecture Decisions
+
+- [ADR Index](adr/README.md)
+- [ADR-0001: Web Framework](adr/0001-web-framework.md)
+- [ADR-0002: Canonical Frontend](adr/0002-canonical-frontend.md)
+- [ADR-0003: SDK Packaging](adr/0003-sdk-packaging.md)
+- [ADR-0004: Tenancy Model](adr/0004-tenancy-model.md)
+- [ADR-0005: Scripting Sandbox](adr/0005-scripting-sandbox.md)
+- [ADR-0006: Event Storage and Partitioning](adr/0006-event-storage-partitioning.md)
+- [ADR-0007: Telemetry Stack](adr/0007-telemetry-stack.md)
+- [ADR-0008: Feature-Flag Strategy](adr/0008-feature-flag-strategy.md)
+- [ADR-0009: Aggregation Merge](adr/0009-aggregation-merge.md)
+- [ADR-0010: Cargo Workspace Layout](adr/0010-cargo-workspace.md)
+- [ADR-0011: Connection Pool Consolidation](adr/0011-connection-pool-consolidation.md)
 
 ---
 

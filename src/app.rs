@@ -10,7 +10,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use crate::{audit_logging, bloom_filter, compliance_report, compression_config, config, content_filter, costs, cross_chain_correlation, cursor_expiry_handler, db, db_pool, derived_metrics, incident_correlation, advisory_lock, query_streaming, serialization_cache, streaming_response, dedup, distributed_tracing, email, encryption, error, event_hubs, graceful_shutdown, handlers, idempotency, log_analysis_tool, index_monitor, indexer, kafka, kinesis, metrics, prometheus_remote_write, eventbridge, middleware, models, normalizer, notification_dedup, warehouse, pruner, pubsub, queue_publisher, rate_limiter, reencrypt, resource_metrics, routes, rpc_client, schema_validator, sqs, stats_refresh, subscriptions, webhook, webhook_verification, notification_rate_limit, notification_formatter, pagerduty, github, discord, slack, teams, telegram, notification_channel, notification_delivery, integration_handlers, retry_policy, sms, aggregation, saved_queries, abi, oncall, xdr_validation, replica_monitor, feature_flags, event_dedup_replicas, bulk_export, sse_ring_buffer, query_cache, query_plan_cache, query_optimizer, partition_manager, query_builder, notification_admin, financial_accuracy, webhook_template, event_aggregation, anomaly_detection, push_notification, slo_tracker, anonymization, event_compression, health_check, ledger_hashes, networks, zero_trust, push_preload, statistics_management, cloud_provider, cloud_replication, deployment_orchestrator};
+use crate::{audit_logging, bloom_filter, compliance_report, compression_config, config, content_filter, costs, cross_chain_correlation, cursor_expiry_handler, db, db_pool, derived_metrics, incident_correlation, advisory_lock, query_streaming, serialization_cache, streaming_response, dedup, distributed_tracing, email, encryption, error, event_hubs, graceful_shutdown, handlers, idempotency, log_analysis_tool, index_monitor, indexer, kafka, kinesis, metrics, prometheus_remote_write, eventbridge, middleware, models, normalizer, notification_dedup, warehouse, pruner, pubsub, queue_publisher, rate_limiter, reencrypt, resource_metrics, routes, rpc_client, schema_validator, sqs, stats_refresh, subscriptions, webhook, webhook_verification, notification_rate_limit, notification_formatter, pagerduty, github, discord, slack, teams, telegram, notification_channel, notification_delivery, integration_handlers, retry_policy, sms, aggregation, saved_queries, abi, oncall, xdr_validation, replica_monitor, feature_flags, event_dedup_replicas, bulk_export, sse_ring_buffer, query_cache, query_plan_cache, query_optimizer, partition_manager, query_builder, notification_admin, financial_accuracy, webhook_template, anomaly_detection, push_notification, slo_tracker, anonymization, event_compression, health_check, ledger_hashes, networks, zero_trust, push_preload, statistics_management, cloud_provider, cloud_replication, deployment_orchestrator};
 #[cfg(feature = "lua")]
 use crate::lua_transform;
 #[cfg(feature = "parquet")]
@@ -27,6 +27,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
+use tower_http::catch_panic::CatchPanicLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[cfg(feature = "otel")]
@@ -80,6 +81,82 @@ pub fn shutdown_telemetry() {
     global::shutdown_tracer_provider();
 }
 
+/// Issue #1434: install a process-wide panic hook that records a metric and
+/// logs the panic payload. Panics inside spawned tasks are otherwise swallowed
+/// silently, leaving subsystems dead while health checks still pass.
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            metrics::record_panic(info.location().map(|l| l.file()).unwrap_or("unknown"));
+            error!(
+                location = ?info.location(),
+                payload = %panic_payload(info),
+                "Panic caught — recording metric"
+            );
+            default_hook(info);
+        }));
+    });
+}
+
+/// Best-effort extraction of the panic payload as a string.
+fn panic_payload(info: &std::panic::PanicHookInfo<'_>) -> String {
+    if let Some(s) = info.payload().downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = info.payload().downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// Issue #1434: wrap a background task so that a panic is logged, counted and
+/// the task is restarted after a short backoff. The task is restarted until
+/// `shutdown_rx` observes a change (or the sender is dropped).
+pub fn supervise<F, Fut>(name: &'static str, shutdown_rx: tokio::sync::watch::Receiver<bool>, mut task: F)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut shutdown_rx = shutdown_rx;
+        loop {
+            let fut = task();
+            let handle = tokio::spawn(fut);
+            tokio::select! {
+                res = handle => {
+                    match res {
+                        Ok(()) => {
+                            info!(task = name, "Supervised task exited normally");
+                            break;
+                        }
+                        Err(join_err) if join_err.is_panic() => {
+                            metrics::record_task_restart(name);
+                            error!(task = name, "Supervised task panicked — restarting after backoff");
+                        }
+                        Err(join_err) => {
+                            error!(task = name, error = %join_err, "Supervised task failed — restarting after backoff");
+                            metrics::record_task_restart(name);
+                        }
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        _ = shutdown_rx.changed() => {
+                            info!(task = name, "Shutdown signalled — not restarting task");
+                            break;
+                        }
+                    }
+                }
+                _ = shutdown_rx.changed() => {
+                    info!(task = name, "Shutdown signalled — stopping supervised task");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 /// A fully wired application: a bound listener and the router to serve on it.
 pub struct App {
     pub listener: tokio::net::TcpListener,
@@ -131,6 +208,9 @@ impl AppBuilder {
 
     /// Wire every subsystem and bind the HTTP listener.
     pub async fn build(self) -> anyhow::Result<App> {
+        // Issue #1434: record panics as a metric before anything else starts.
+        install_panic_hook();
+
         // Initialize metrics exporter
         let prometheus_handle = metrics::init_metrics();
 
@@ -751,9 +831,17 @@ impl AppBuilder {
 
         let mut indexer_job_names = Vec::new();
         if config.role.runs_indexer() {
-            // Spawn the indexer background task.
-            jobs.spawn("indexer", async move {
-                indexer.run().await;
+            // Spawn the indexer background task under supervision so a panic is
+            // logged, counted and the loop restarted (issue #1434).
+            let indexer = Arc::new(tokio::sync::Mutex::new(indexer));
+            let indexer_for_task = indexer.clone();
+            let indexer_shutdown_rx = shutdown_rx.clone();
+            supervise("indexer", indexer_shutdown_rx, move || {
+                let indexer = indexer_for_task.clone();
+                async move {
+                    let mut guard = indexer.lock().await;
+                    guard.run().await;
+                }
             });
             tokio::spawn(rpc_latency_probe.run(shutdown_rx.clone()));
             indexer_job_names.push("indexer".to_string());
@@ -800,9 +888,21 @@ impl AppBuilder {
                 network_indexer.set_cost_calculator(cost_calculator.clone());
 
                 let job_name = format!("indexer:{}", target.chain_id);
-                jobs.spawn(job_name.clone(), async move {
-                    network_indexer.run().await;
-                });
+                let network_indexer = Arc::new(tokio::sync::Mutex::new(network_indexer));
+                let network_indexer_for_task = network_indexer.clone();
+                let network_shutdown_rx = shutdown_rx.clone();
+                let job_name_for_task = job_name.clone();
+                supervise(
+                    Box::leak(job_name_for_task.into_boxed_str()),
+                    network_shutdown_rx,
+                    move || {
+                        let network_indexer = network_indexer_for_task.clone();
+                        async move {
+                            let mut guard = network_indexer.lock().await;
+                            guard.run().await;
+                        }
+                    },
+                );
                 indexer_job_names.push(job_name);
             }
 
@@ -872,6 +972,32 @@ impl AppBuilder {
                 "Starting incident correlation detector"
             );
             incident_correlation::spawn_detector(pool.clone(), incident_config, shutdown_rx.clone());
+        }
+
+        // Issue #1416: Spawn the scheduled replay loop. It polls the persisted
+        // replay schedules and dispatches any that are due, so scheduled replays
+        // actually run instead of being dead code.
+        {
+            let replay_pool = pool.clone();
+            let replay_interval_secs = config.scheduled_replay_interval_secs;
+            let mut replay_shutdown_rx = shutdown_rx.clone();
+            info!(
+                interval_secs = replay_interval_secs,
+                "Starting scheduled replay job"
+            );
+            jobs.spawn("scheduled-replay", async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(replay_interval_secs));
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            if let Err(e) = crate::scheduled_replay::process_due_schedules(&replay_pool).await {
+                                warn!(error = %e, "Scheduled replay tick failed");
+                            }
+                        }
+                        _ = replay_shutdown_rx.changed() => break,
+                    }
+                }
+            });
         }
 
         // #496: Spawn audit log purge job
@@ -1052,12 +1178,17 @@ impl AppBuilder {
             )
         };
 
-        // Issue #1432: install the ClientIp extractor layer. It reads the TCP
-        // peer address from `ConnectInfo` and only honours forwarding headers
-        // when that peer is a trusted proxy, resolving the right-most untrusted
-        // hop. Audit logging, rate limiting, SSE per-IP limits and IP access
-        // control all consume the resolved `ClientIp` from request extensions.
-        let router = router.layer(axum::extract::connect_info::ConnectInfo::<SocketAddr>::into_make_service_with_connect_info::<SocketAddr>().into_layer(trusted_proxies.clone()));
+        // Issue #1434: convert handler panics into 500 responses instead of
+        // aborting the connection / killing the task.
+        let router = router.layer(CatchPanicLayer::custom(
+            |_err: Box<dyn std::any::Any + Send + 'static>| {
+                metrics::record_panic("handler");
+                axum::response::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(axum::body::Body::from("Internal Server Error"))
+                    .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
+            },
+        ));
 
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
             error!(addr = %addr, "Address already in use");
@@ -1078,5 +1209,64 @@ impl AppBuilder {
     pub async fn build_test(router: axum::Router) -> anyhow::Result<(tokio::net::TcpListener, axum::Router)> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
         Ok((listener, router))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+
+    async fn panicking_handler() -> &'static str {
+        panic!("intentional test panic");
+    }
+
+    async fn ok_handler() -> &'static str {
+        "ok"
+    }
+
+    /// Issue #1434: a panicking handler must yield a 500 and the server must
+    /// keep serving subsequent requests.
+    #[tokio::test]
+    async fn catch_panic_layer_returns_500_and_server_survives() {
+        install_panic_hook();
+
+        let app = axum::Router::new()
+            .route("/panic", get(panicking_handler))
+            .route("/ok", get(ok_handler))
+            .layer(CatchPanicLayer::custom(
+                |_err: Box<dyn std::any::Any + Send + 'static>| {
+                    axum::response::Response::builder()
+                        .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(axum::body::Body::from("Internal Server Error"))
+                        .unwrap_or_else(|_| {
+                            axum::response::Response::new(axum::body::Body::empty())
+                        })
+                },
+            ));
+
+        let (listener, app) = AppBuilder::build_test(app).await.expect("bind test listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let client = reqwest::Client::new();
+        let panic_resp = client
+            .get(format!("http://{addr}/panic"))
+            .send()
+            .await
+            .expect("panic request");
+        assert_eq!(panic_resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+
+        let ok_resp = client
+            .get(format!("http://{addr}/ok"))
+            .send()
+            .await
+            .expect("ok request");
+        assert_eq!(ok_resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(ok_resp.text().await.expect("body"), "ok");
+
+        server.abort();
     }
 }

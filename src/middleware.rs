@@ -303,15 +303,14 @@ mod tests {
     }
 
     async fn get_headers(path: &str) -> axum::http::HeaderMap {
+        let request = HttpRequest::builder()
+            .uri(path)
+            .body(Body::empty())
+            .expect("test request builder should accept a valid path and empty body");
         let response = test_router()
-            .oneshot(
-                HttpRequest::builder()
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(request)
             .await
-            .unwrap();
+            .expect("test router should handle the request without error");
         assert_eq!(response.status(), StatusCode::OK);
         response.headers().clone()
     }
@@ -321,15 +320,21 @@ mod tests {
         let headers = get_headers("/api/ping").await;
 
         assert_eq!(
-            headers.get(header::CONTENT_SECURITY_POLICY).unwrap(),
+            headers
+                .get(header::CONTENT_SECURITY_POLICY)
+                .expect("CSP header should be present on API responses"),
             API_CSP
         );
         assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
+            headers
+                .get(header::STRICT_TRANSPORT_SECURITY)
+                .expect("HSTS header should be present on API responses"),
             HSTS
         );
         assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .expect("X-Content-Type-Options header should be present on API responses"),
             X_CONTENT_TYPE_OPTIONS
         );
     }
@@ -392,17 +397,21 @@ mod tests {
 
         let csp = headers
             .get(header::CONTENT_SECURITY_POLICY)
-            .unwrap()
+            .expect("CSP header should be present on docs responses")
             .to_str()
-            .unwrap();
+            .expect("CSP header value should be valid ASCII");
         assert!(csp.contains("https://unpkg.com"));
         assert!(csp.contains("'unsafe-inline'"));
         assert_eq!(
-            headers.get(header::STRICT_TRANSPORT_SECURITY).unwrap(),
+            headers
+                .get(header::STRICT_TRANSPORT_SECURITY)
+                .expect("HSTS header should be present on docs responses"),
             HSTS
         );
         assert_eq!(
-            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .expect("X-Content-Type-Options header should be present on docs responses"),
             X_CONTENT_TYPE_OPTIONS
         );
     }
