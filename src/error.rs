@@ -488,6 +488,9 @@ impl From<AuthError> for AppError {
     }
 }
 
+/// Type alias for API error (backward compatibility)
+pub type ApiError = AppError;
+
 // ---------------------------------------------------------------------------
 // sqlx error mapping — Issue #1435
 // ---------------------------------------------------------------------------
