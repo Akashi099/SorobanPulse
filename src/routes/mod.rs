@@ -471,6 +471,201 @@ pub fn create_router_with_tx_and_tenant_map(
         .merge(subscriptions::routes())
         .merge(webhooks::routes())
         .merge(admin::routes())
+        .route("/events", get(handlers::get_events))
+        .route("/events/feed.rss", get(handlers::get_events_feed))
+        .route("/events/stats", get(handlers::get_event_stats))
+        .route("/contracts/{contract_id}/stats/history", get(handlers::get_contract_stats_history))
+        // Issue #1257: per-contract resource and fee statistics.
+        .route("/contracts/{contract_id}/stats", get(crate::contract_resource_stats::get_contract_resource_stats))
+        .route("/events/diff", get(handlers::get_events_diff))
+        .route("/events/export", get(handlers::export_events))
+        .route("/events/timeseries", get(handlers::get_timeseries))
+        .route("/events/temporal", get(handlers::get_temporal_events))
+        .route("/events/recent", get(handlers::get_recent_events))
+        .route("/events/stream", get(handlers::stream_events))
+        .route("/events/stream/multi", get(handlers::stream_events_multi))
+        .route("/events/ws", get(handlers::ws_stream_events))
+        .route(
+            "/events/contract/{contract_id}",
+            get(handlers::get_events_by_contract),
+        )
+        .route(
+            "/events/contract/{contract_id}/stream",
+            get(handlers::stream_events_by_contract),
+        )
+        .route(
+            "/events/tx/batch",
+            axum::routing::post(handlers::get_events_by_tx_batch),
+        )
+        .route(
+            "/admin/events/bulk",
+            axum::routing::post(handlers::bulk_insert_events),
+        )
+        .route("/events/tx/{tx_hash}/related", get(handlers::get_related_events_by_tx))
+        .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
+        .route(
+            "/events/ledger-hash/{hash}",
+            get(handlers::get_events_by_ledger_hash),
+        )
+        .route("/contracts", get(handlers::get_contracts))
+        .route("/contracts/search", get(handlers::get_contracts_search))
+        .route("/contracts/exists", get(handlers::check_contract_exists))
+        .route("/config", get(handlers::get_config))
+        .route("/rate-limit/status", get(handlers::get_rate_limit_status))
+        .route("/admin/config/reload", axum::routing::post(handlers::reload_config))
+        .route("/config/anonymization", axum::routing::get(handlers::get_anonymization_config))
+        .route("/config/anonymization/rules", axum::routing::post(handlers::upsert_anonymization_rule))
+        .route("/config/anonymization/rules/{name}", axum::routing::delete(handlers::delete_anonymization_rule))
+        .route("/config/anonymization/scan", axum::routing::post(handlers::scan_event_for_pii))
+        .route("/cross-chain/trace/{tx_hash}", get(handlers::get_cross_chain_trace))
+        .route("/cross-chain/causality", get(handlers::analyze_causality))
+        .route("/contracts/{contract_id}/metadata", get(handlers::get_contract_metadata))
+        .route("/contracts/{contract_id}/summary", get(handlers::get_contract_summary))
+        .route("/contracts/{contract_id}/event-counts", get(handlers::get_contract_event_counts))
+        .route("/admin/replay", axum::routing::post(handlers::replay_events))
+        .route("/replay/with-transform", axum::routing::post(handlers::replay_with_transform))
+        .route("/admin/reencrypt", axum::routing::post(handlers::start_reencrypt))
+        .route("/admin/mask-events", axum::routing::post(handlers::start_mask_events))
+        .route("/admin/mask-events/{job_id}", get(handlers::get_mask_job_status))
+        .route("/admin/notifications/channels", axum::routing::post(handlers::create_notification_channel))
+        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi).get(handlers::get_contract_abi))
+        .route("/admin/contracts/{contract_id}/metadata", axum::routing::post(handlers::upsert_contract_metadata).delete(handlers::delete_contract_metadata))
+        .route("/admin/contracts/metadata/import", axum::routing::post(handlers::bulk_import_contract_metadata))
+        .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
+        .route("/admin/events/contract/{contract_id}", axum::routing::delete(handlers::delete_contract_events))
+        .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
+        .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
+        .route("/admin/contracts/{contract_id}/schema", axum::routing::post(handlers::register_contract_schema).get(handlers::get_contract_schema).delete(handlers::delete_contract_schema))
+        .route("/admin/contracts/{contract_id}/validate", axum::routing::post(handlers::validate_event_data_against_schema))
+        .route("/admin/schemas", axum::routing::get(handlers::list_contract_schemas))
+        .route("/notifications/email/bounce", axum::routing::post(handlers::email_bounce_webhook))
+        .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
+        .route("/subscriptions/{id}", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
+        .route("/subscriptions/{id}/ack", axum::routing::post(subscriptions::ack_subscription))
+        // Issue #619: Email notification config for subscriptions
+        .route("/subscriptions/{id}/email", get(subscriptions::get_subscription_email).put(subscriptions::update_subscription_email))
+        // Issue #620: Push notification config for subscriptions
+        .route("/subscriptions/{id}/push", get(crate::push_notification::get_subscription_push).put(crate::push_notification::update_subscription_push))
+        // Issue #839: Push notification preferences
+        .route("/subscriptions/{id}/push/preferences", get(crate::push_notification::get_notification_preferences).put(crate::push_notification::update_notification_preferences))
+        // Issue #628: Batch subscription config and delivery
+        .route("/subscriptions/{id}/batch", get(subscriptions::get_subscription_batch_config).put(subscriptions::update_subscription_batch_config).post(subscriptions::deliver_batch))
+        // Issue #884: Subscription pause/resume
+        .route("/subscriptions/{id}/pause", axum::routing::post(subscriptions::pause_subscription))
+        .route("/subscriptions/{id}/resume", axum::routing::post(subscriptions::resume_subscription))
+        .route("/subscriptions/{id}/pause-status", get(subscriptions::get_pause_resume_status))
+        // Issue #882: Anomaly detection alerting
+        .route("/admin/subscriptions/{subscription_id}/anomaly-config", axum::routing::post(handlers::create_anomaly_config))
+        .route("/admin/subscriptions/{subscription_id}/anomaly-alerts", get(handlers::get_anomaly_alerts))
+        .route("/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge", axum::routing::post(handlers::acknowledge_anomaly_alert))
+        // Issue #674: GitHub integration
+        .route("/subscriptions/{id}/integrations/github", axum::routing::post(crate::integration_handlers::setup_github_integration).get(crate::integration_handlers::get_github_integration).delete(crate::integration_handlers::delete_github_integration))
+        // Issue #675: Discord integration
+        .route("/subscriptions/{id}/integrations/discord", axum::routing::post(crate::integration_handlers::setup_discord_integration).get(crate::integration_handlers::get_discord_integration).delete(crate::integration_handlers::delete_discord_integration))
+        // Issue #1348: Microsoft Teams integration
+        .route("/subscriptions/{id}/integrations/teams", axum::routing::post(crate::integration_handlers::setup_teams_integration).get(crate::integration_handlers::get_teams_integration).delete(crate::integration_handlers::delete_teams_integration))
+        .route("/subscriptions/{id}/test", axum::routing::post(crate::integration_handlers::test_subscription_integrations))
+        // Issue #676: Slack integration
+        .route("/subscriptions/{id}/integrations/slack", axum::routing::post(crate::integration_handlers::setup_slack_integration).get(crate::integration_handlers::get_slack_integration).delete(crate::integration_handlers::delete_slack_integration))
+        // Issue #677: Telegram integration
+        .route("/subscriptions/{id}/integrations/telegram", axum::routing::post(crate::integration_handlers::setup_telegram_integration).get(crate::integration_handlers::get_telegram_integration).delete(crate::integration_handlers::delete_telegram_integration))
+        // Issue #951: PagerDuty integration
+        .route("/subscriptions/{id}/integrations/pagerduty", axum::routing::post(crate::integration_handlers::setup_pagerduty_integration).get(crate::integration_handlers::get_pagerduty_integration).delete(crate::integration_handlers::delete_pagerduty_integration))
+        .route("/subscriptions/{id}/integrations/pagerduty/incidents", axum::routing::get(crate::integration_handlers::list_pagerduty_incidents))
+        .route("/subscriptions/{id}/integrations/pagerduty/incidents/acknowledge", axum::routing::post(crate::integration_handlers::acknowledge_pagerduty_incident))
+        .route("/subscriptions/{id}/integrations/pagerduty/incidents/resolve", axum::routing::post(crate::integration_handlers::resolve_pagerduty_incident))
+        // Issue #487: email open tracking (public – email clients fetch the pixel)
+        .route("/notifications/email/track/{token}", get(handlers::track_email_open))
+        // Issue #487: email open stats (admin)
+        .route("/admin/notifications/email/stats", get(handlers::get_email_stats))
+        // Issue #488: email click tracking (public – email link redirect)
+        .route("/notifications/email/click/{token}", get(handlers::track_email_click))
+        // Issue #489: A/B test results (admin)
+        .route("/admin/notifications/email/ab-test/results", get(handlers::get_ab_test_results))
+        // Issue #490: suppression list management (admin)
+        .route("/admin/notifications/suppress", axum::routing::post(handlers::add_suppression))
+        .route("/admin/notifications/suppress/{id}", axum::routing::delete(handlers::remove_suppression))
+        // #586: Replica sync monitoring
+        .route("/admin/replication/status", axum::routing::get(handlers::get_replication_status))
+        // #587: Feature flag management
+        .route("/admin/feature-flags", axum::routing::get(handlers::list_feature_flags))
+        .route("/admin/feature-flags/audit", axum::routing::get(handlers::get_feature_flag_audit))
+        // #694: Index fragmentation monitoring
+        .route("/admin/indexes/fragmentation", axum::routing::get(handlers::get_index_fragmentation))
+        .route("/admin/indexes/{index_name}/reindex", axum::routing::post(handlers::reindex_index))
+        // Issue #609: Multi-chain networks
+        .route("/networks", axum::routing::get(handlers::list_networks))
+        // Issue #608: Ledger hash endpoints
+        .route("/ledgers/{ledger}/hash", axum::routing::get(handlers::get_ledger_hash))
+        .route("/ledgers/verify-chain", axum::routing::get(handlers::verify_ledger_hash_chain))
+        // Issue #610: Compression admin endpoints
+        .route("/admin/compression/stats", axum::routing::get(handlers::compression_stats))
+        .route("/admin/compression/migrate", axum::routing::post(handlers::start_compression_migration))
+        .route("/tokens/{contract_id}/transfers", axum::routing::get(crate::token_events::get_token_transfers))
+        .route("/accounts/{address}/events", axum::routing::get(crate::account_events::get_account_events))
+        .route("/events/sep41", axum::routing::get(crate::sep41::get_sep41_events))
+        .route("/contracts/{contract_id}/versions", axum::routing::get(crate::contract_versions::get_contract_versions))
+        // Issue #1255: deployment record (deployer, WASM hash, label)
+        .route("/contracts/{contract_id}", axum::routing::get(crate::contract_tracker::get_contract))
+        // Issue #1253: contract spec auto-fetched from on-chain WASM
+        .route("/contracts/{contract_id}/spec", axum::routing::get(crate::contract_specs::get_contract_spec))
+        // Issue #607: Cached ABI endpoint
+        .route("/contracts/{contract_id}/abi/cached", axum::routing::get(handlers::get_contract_abi_cached))
+        // Issue #632: Feature flag client-side endpoint
+        .route("/features", axum::routing::get(handlers::get_feature_flag_status))
+        // Issue #670: Audit log query endpoint (admin)
+        .route("/admin/audit-logs", axum::routing::get(handlers::get_audit_logs))
+        // Issue #671: Trending analytics
+        .route("/analytics/trending", axum::routing::get(handlers::get_trending_events))
+        // Issue #672: Event correlation analysis
+        .route("/analytics/correlations", axum::routing::get(handlers::get_event_correlations))
+        // Issue #673: Dedicated export endpoints
+        .route("/export/csv", axum::routing::get(handlers::export_events_csv))
+        .route("/export/json", axum::routing::get(handlers::export_events_json))
+        .route("/export/parquet", axum::routing::get(handlers::export_events_parquet))
+        .route("/export/schedule", axum::routing::post(handlers::schedule_export_job))
+        .route("/export/jobs/{job_id}", axum::routing::get(handlers::get_export_job_status_db))
+        .route("/export/history", axum::routing::get(handlers::get_export_history))
+        // Push-preload endpoints: read-only schema/ABI lookup for HTTP/2 push
+        // and client-side preloading. Gated by enable_push_preload at the
+        // handler level so the routes are always registered (returning 501 when
+        // the flag is off) to keep the routing table stable.
+        .route(
+            "/push/{contract_id}/schema",
+            axum::routing::get(crate::push_preload::get_push_schema),
+        )
+        .route(
+            "/push/{contract_id}/abi",
+            axum::routing::get(crate::push_preload::get_push_abi),
+        )
+        // Issue #931: Batch event operations
+        .route("/events/batch/retrieve", axum::routing::post(crate::batch_operations::batch_retrieve_events))
+        .route("/events/batch/delete", axum::routing::post(crate::batch_operations::batch_delete_events))
+        .route("/events/batch/tag", axum::routing::post(crate::batch_operations::batch_tag_events))
+        .route("/events/batch/subscriptions", axum::routing::post(crate::batch_operations::batch_update_subscriptions))
+        .route("/events/batch/transform", axum::routing::post(crate::batch_operations::batch_transform_events))
+        .route("/events/batch/progress/{job_id}", axum::routing::get(crate::batch_operations::get_batch_progress))
+        // Issue #929: Real-time event stream statistics
+        .route("/stats/stream", axum::routing::get(crate::stream_statistics::get_stream_stats))
+        .route("/stats/stream/throughput", axum::routing::get(crate::stream_statistics::get_stream_throughput))
+        .route("/stats/stream/{contract_id}", axum::routing::get(crate::stream_statistics::get_contract_stream_stats))
+        // Issue #928: Event filtering DSL
+        .route("/events/filter", axum::routing::post(crate::filter_dsl::get_events_with_dsl))
+        .route("/admin/dsl/compile", axum::routing::post(crate::filter_dsl::compile_dsl_filter))
+        .route("/admin/dsl/filters", axum::routing::post(crate::filter_dsl::save_dsl_filter).get(crate::filter_dsl::list_dsl_filters))
+        // Issue #1416: event tagging, scheduled replay, and timezone/locale
+        // modules are now compiled and reachable at runtime.
+        .route("/events/tags", axum::routing::get(crate::event_tagging::list_tags).post(crate::event_tagging::create_tag))
+        .route("/events/tags/{tag}", axum::routing::delete(crate::event_tagging::delete_tag))
+        .route("/events/{id}/tags", axum::routing::get(crate::event_tagging::get_event_tags).post(crate::event_tagging::tag_event))
+        .route("/events/{id}/tags/{tag}", axum::routing::delete(crate::event_tagging::untag_event))
+        .route("/admin/scheduled-replays", axum::routing::get(crate::scheduled_replay::list_scheduled_replays).post(crate::scheduled_replay::create_scheduled_replay))
+        .route("/admin/scheduled-replays/{id}", axum::routing::get(crate::scheduled_replay::get_scheduled_replay).delete(crate::scheduled_replay::cancel_scheduled_replay))
+        .route("/admin/scheduled-replays/{id}/run", axum::routing::post(crate::scheduled_replay::run_scheduled_replay))
+        .route("/timezone", axum::routing::get(crate::timezone_locale::get_timezone))
+        .route("/timezone/{timezone}", axum::routing::get(crate::timezone_locale::get_timezone_info))
+        .route("/locales", axum::routing::get(crate::timezone_locale::list_locales))
+        .route("/locales/{locale}", axum::routing::get(crate::timezone_locale::get_locale))
         // Append Link preload headers to responses for
         // /v1/events/contract/{contract_id} when the feature flag is on.
         .route_layer(axum::middleware::from_fn_with_state(

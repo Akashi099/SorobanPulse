@@ -807,6 +807,56 @@ mod tests {
         );
     }
 
+    /// Load the shared cross-language webhook signature fixture and verify
+    /// every vector against the server's signing implementation
+    /// (Issue #1413). This ties the fixture to `sign_payload` so drift in
+    /// either the fixture or the signing scheme is caught.
+    #[test]
+    fn test_signature_vectors_fixture_matches_signing_implementation() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/webhook_signature_vectors.json");
+        let raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", fixture_path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", fixture_path.display()));
+
+        let vectors = fixture
+            .get("vectors")
+            .and_then(|v| v.as_array())
+            .expect("fixture must contain a `vectors` array");
+        assert!(!vectors.is_empty(), "fixture must contain at least one vector");
+
+        for vector in vectors {
+            let name = vector
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unnamed>");
+            let secret = vector
+                .get("secret")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("vector {name} missing `secret`"));
+            let timestamp = vector
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("vector {name} missing `timestamp`"));
+            let payload = vector
+                .get("payload")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("vector {name} missing `payload`"));
+            let expected = vector
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("vector {name} missing `signature`"));
+
+            let signed = format!("{timestamp}.{payload}");
+            let actual = sign_payload(secret, signed.as_bytes());
+            assert_eq!(
+                actual, expected,
+                "signature mismatch for vector `{name}` (signed payload: {signed:?})"
+            );
+        }
+    }
+
     #[test]
     fn test_evaluate_priority_no_rule_returns_default() {
         let event = mock_event("C1");

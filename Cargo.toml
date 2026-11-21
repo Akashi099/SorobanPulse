@@ -142,6 +142,40 @@ tempfile = "3"
 wiremock = "0.6"
 insta = "1"
 
+# Issue #1415: Criterion benchmarks require `harness = false`; otherwise Cargo
+# links the default libtest harness, which conflicts with `criterion_main!`.
+[[bench]]
+name = "compression"
+harness = false
+
+[[bench]]
+name = "conditional_get"
+harness = false
+
+[[bench]]
+name = "db_queries"
+harness = false
+
+[[bench]]
+name = "pagination"
+harness = false
+
+[[bench]]
+name = "query_planning"
+harness = false
+
+[[bench]]
+name = "serialization"
+harness = false
+
+[[bench]]
+name = "serialization_cache"
+harness = false
+
+[[bench]]
+name = "streaming_response"
+harness = false
+
 # Issue #1441: development-only binaries. They are not built unless the
 # `dev-tools` feature is enabled, keeping production images free of them.
 [[bin]]
