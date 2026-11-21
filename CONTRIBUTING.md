@@ -559,6 +559,29 @@ Never log passwords, API keys, tokens, or other credentials at any log level. Th
 
 When adding new log statements, double-check that no field contains a raw secret. If in doubt, strip credentials before logging (see `Config::safe_db_url()` for the pattern).
 
+## Security Review Guide
+
+The project's threat model and trust-boundary inventory live in
+[docs/security/threat-model.md](docs/security/threat-model.md). It documents the
+data flows (public API, admin API, indexer ↔ Stellar RPC, Postgres, Redis/Kafka/SQS
+sinks, outbound webhooks and integrations, inbound provider webhooks, dashboard),
+the assets and trust boundaries, and a STRIDE analysis with existing mitigations
+and known gaps.
+
+**PRs that add or change any of the following must follow the security review
+guide in [docs/security/threat-model.md](docs/security/threat-model.md):**
+
+- HTTP endpoints, especially admin endpoints or anything that accepts user input
+- Integrations: outbound webhooks, Kafka/SQS/Redis sinks, Slack, or any new
+  third-party service
+- Scripting: Lua scripts or other user-defined code execution paths
+- Credential handling (`integration_secrets.rs`) or inbound provider webhook
+  signature verification
+
+Walk through the guide's checklist in the PR description, note which trust
+boundaries your change crosses, and link any follow-up security issue you open.
+=======
+
 ## Code Style
 
 - Formatting is enforced by `rustfmt` using the project's `rustfmt.toml` (`max_width = 100`, `edition = "2021"`).

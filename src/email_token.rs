@@ -403,13 +403,20 @@ fn log_abuse_attempt(reason: &str) {
 
 /// SNS message signature verification.
 ///
-/// Parses the SNS JSON envelope, validates the `SigningCertURL`, fetches the
-/// signing certificate through the SSRF-safe outbound client (cached per URL),
-/// builds the canonical string-to-sign and verifies the RSA PKCS#1 v1.5
-/// signature (SHA1 for `SignatureVersion` 1, SHA256 for version 2).
+/// Implements the AWS SNS message-authentication scheme (issue #1421):
 ///
-/// Messages whose `Timestamp` falls outside the configured window are rejected
-/// to prevent replay.
+/// 1. Parse the SNS JSON envelope and validate `SigningCertURL` — it must be
+///    HTTPS, its host must match `^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$`,
+///    and its path must end in `.pem`.
+/// 2. Fetch the signing certificate through the SSRF-safe outbound client and
+///    cache it by URL.
+/// 3. Rebuild the canonical string-to-sign (which differs for `Notification`
+///    vs `SubscriptionConfirmation`/`UnsubscribeConfirmation`) and verify the
+///    RSA PKCS#1 v1.5 signature for `SignatureVersion` 1 (SHA1) and 2 (SHA256).
+/// 4. Reject messages whose `Timestamp` is outside the configured window.
+///
+/// Any failure returns [`AppError::Validation`], which the HTTP layer maps to
+/// `401 Unauthorized` before any suppression state is touched.
 fn verify_sns_signature(
     headers: &axum::http::HeaderMap,
     body: &[u8],
@@ -428,84 +435,356 @@ fn verify_sns_signature(
         ));
     }
 
-    let envelope: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
-        log_abuse_attempt("sns: invalid JSON body");
-        AppError::Validation("invalid SNS message body".into())
-    })?;
+    let envelope: SnsEnvelope = serde_json::from_slice(body)
+        .map_err(|_| AppError::Validation("SNS body is not a valid JSON envelope".into()))?;
 
     // The header and the body must agree on the message type.
-    let body_type = envelope["Type"].as_str().unwrap_or_default();
-    if body_type != msg_type {
-        log_abuse_attempt("sns: message type mismatch");
+    if envelope.message_type() != msg_type {
         return Err(AppError::Validation(
-            "SNS message type mismatch between header and body".into(),
+            "X-Amz-Sns-Message-Type header does not match body Type".into(),
         ));
     }
 
-    // Reject stale messages (replay protection).
-    let timestamp = envelope["Timestamp"].as_str().ok_or_else(|| {
-        AppError::Validation("SNS message missing Timestamp".into())
-    })?;
-    let ts_secs = parse_rfc3339_unix(timestamp).ok_or_else(|| {
-        AppError::Validation("SNS message has invalid Timestamp".into())
-    })?;
-    let window = sns_timestamp_window_secs();
-    let now = unix_now();
-    if now.abs_diff(ts_secs) > window {
-        log_abuse_attempt("sns: timestamp outside tolerance window");
-        return Err(AppError::Validation(
-            "SNS message timestamp outside tolerance window".into(),
-        ));
+    // 1. Validate the certificate URL before any network access.
+    validate_sns_cert_url(&envelope.signing_cert_url)?;
+
+    // 4. Replay window.
+    check_sns_timestamp(&envelope.timestamp)?;
+
+    // 3. Rebuild the canonical string-to-sign.
+    let string_to_sign = envelope.string_to_sign()?;
+
+    // 2. Fetch (or reuse cached) certificate, then verify the RSA signature.
+    let cert_pem = sns_cert_cache()
+        .get_or_fetch(&envelope.signing_cert_url)
+        .map_err(|e| {
+            log_abuse_attempt("SNS signing certificate unavailable");
+            e
+        })?;
+
+    verify_sns_rsa_signature(
+        &cert_pem,
+        &string_to_sign,
+        &envelope.signature_version,
+        &envelope.signature,
+    )
+    .map_err(|e| {
+        log_abuse_attempt("invalid SNS message signature");
+        e
+    })
+}
+
+// ---------------------------------------------------------------------------
+// SNS envelope parsing & canonicalisation
+// ---------------------------------------------------------------------------
+
+/// The subset of the SNS JSON envelope needed for signature verification.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SnsEnvelope {
+    #[serde(rename = "Type")]
+    type_: String,
+    #[serde(rename = "MessageId")]
+    message_id: String,
+    #[serde(rename = "TopicArn")]
+    topic_arn: String,
+    #[serde(rename = "Timestamp")]
+    timestamp: String,
+    #[serde(rename = "SignatureVersion")]
+    signature_version: String,
+    #[serde(rename = "Signature")]
+    signature: String,
+    #[serde(rename = "SigningCertURL")]
+    signing_cert_url: String,
+    /// Present on `Notification` messages.
+    #[serde(default)]
+    subject: Option<String>,
+    /// Present on `Notification` messages.
+    #[serde(default)]
+    message: Option<String>,
+    /// Present on `SubscriptionConfirmation` / `UnsubscribeConfirmation`.
+    #[serde(default)]
+    token: Option<String>,
+    /// Present on `SubscriptionConfirmation` / `UnsubscribeConfirmation`.
+    #[serde(default)]
+    subscribe_url: Option<String>,
+}
+
+impl SnsEnvelope {
+    fn message_type(&self) -> &str {
+        &self.type_
     }
 
-    // Validate the signing certificate URL before doing anything with it.
-    let cert_url = envelope["SigningCertURL"]
-        .as_str()
-        .ok_or_else(|| AppError::Validation("SNS message missing SigningCertURL".into()))?;
-    if !is_valid_sns_cert_url(cert_url) {
-        log_abuse_attempt("sns: invalid SigningCertURL");
-        return Err(AppError::Validation(
-            "SNS SigningCertURL is not an allowed AWS SNS URL".into(),
-        ));
-    }
+    /// Build the canonical string-to-sign exactly as AWS documents it.
+    ///
+    /// The field order and the set of fields differ between message types:
+    /// `Notification` includes `Subject`/`Message`, while the confirmation
+    /// types include `Token`/`SubscribeURL` instead.
+    fn string_to_sign(&self) -> Result<String, AppError> {
+        let mut s = String::new();
+        let mut push = |key: &str, value: &str| {
+            s.push_str(key);
+            s.push('\n');
+            s.push_str(value);
+            s.push('\n');
+        };
 
-    // Build the canonical string-to-sign.
-    let string_to_sign = build_sns_string_to_sign(&envelope, msg_type)?;
+        push("Message", self.message.as_deref().unwrap_or(""));
+        push("MessageId", &self.message_id);
 
-    // Decode the claimed signature.
-    let signature_b64 = envelope["Signature"].as_str().ok_or_else(|| {
-        AppError::Validation("SNS message missing Signature".into())
-    })?;
-    let signature = STANDARD.decode(signature_b64).map_err(|_| {
-        log_abuse_attempt("sns: invalid base64 signature");
-        AppError::Validation("SNS Signature is not valid base64".into())
-    })?;
-
-    let sig_version = envelope["SignatureVersion"]
-        .as_str()
-        .ok_or_else(|| AppError::Validation("SNS message missing SignatureVersion".into()))?;
-
-    // Fetch the signing certificate (cached by URL).
-    let cert_der = fetch_sns_certificate(cert_url)?;
-
-    let verified = match sig_version {
-        "1" => verify_rsa_pkcs1_sha1(&cert_der, string_to_sign.as_bytes(), &signature),
-        "2" => verify_rsa_pkcs1_sha256(&cert_der, string_to_sign.as_bytes(), &signature),
-        other => {
-            return Err(AppError::Validation(format!(
-                "unsupported SNS SignatureVersion: {other}"
-            )))
+        match self.type_.as_str() {
+            "Notification" => {
+                if let Some(subject) = &self.subject {
+                    push("Subject", subject);
+                }
+            }
+            "SubscriptionConfirmation" | "UnsubscribeConfirmation" => {
+                push("SubscribeURL", self.subscribe_url.as_deref().unwrap_or(""));
+                push("Timestamp", &self.timestamp);
+                push("Token", self.token.as_deref().unwrap_or(""));
+                // `Timestamp` already emitted above for confirmation types.
+                push("TopicArn", &self.topic_arn);
+                push("Type", &self.type_);
+                return Ok(s);
+            }
+            other => {
+                return Err(AppError::Validation(format!(
+                    "unsupported SNS message type '{other}'"
+                )));
+            }
         }
-    };
 
-    if !verified {
-        log_abuse_attempt("sns: signature verification failed");
+        push("Timestamp", &self.timestamp);
+        push("TopicArn", &self.topic_arn);
+        push("Type", &self.type_);
+
+        Ok(s)
+    }
+}
+
+/// Validate the `SigningCertURL` against the AWS SNS host allowlist.
+///
+/// Rejects anything that is not HTTPS, whose host does not match
+/// `^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$`, or whose path does not end in
+/// `.pem`.  This is the primary defence against an attacker pointing the
+/// verifier at an arbitrary (or internal) URL.
+fn validate_sns_cert_url(raw: &str) -> Result<(), AppError> {
+    let url = url::Url::parse(raw)
+        .map_err(|_| AppError::Validation("SNS SigningCertURL is not a valid URL".into()))?;
+
+    if url.scheme() != "https" {
         return Err(AppError::Validation(
-            "SNS message signature verification failed".into(),
+            "SNS SigningCertURL must use HTTPS".into(),
+        ));
+    }
+
+    let host = url.host_str().unwrap_or("");
+    if !is_sns_cert_host(host) {
+        return Err(AppError::Validation(format!(
+            "SNS SigningCertURL host '{host}' is not an AWS SNS host"
+        )));
+    }
+
+    if !url.path().ends_with(".pem") {
+        return Err(AppError::Validation(
+            "SNS SigningCertURL path must end in .pem".into(),
         ));
     }
 
     Ok(())
+}
+
+/// True if `host` matches `^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$`.
+fn is_sns_cert_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let rest = match host.strip_prefix("sns.") {
+        Some(r) => r,
+        None => return false,
+    };
+    let rest = match rest
+        .strip_suffix(".amazonaws.com.cn")
+        .or_else(|| rest.strip_suffix(".amazonaws.com"))
+    {
+        Some(r) => r,
+        None => return false,
+    };
+    // The region label must be non-empty and contain only [a-z0-9-].
+    !rest.is_empty()
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Reject messages whose `Timestamp` is older (or further in the future) than
+/// the configured replay window.
+fn check_sns_timestamp(timestamp: &str) -> Result<(), AppError> {
+    let ts = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| AppError::Validation("SNS Timestamp is not valid RFC 3339".into()))?;
+    let ts = ts.with_timezone(&chrono::Utc);
+
+    let window = sns_timestamp_window();
+    let now = chrono::Utc::now();
+    let age = now.signed_duration_since(ts);
+
+    if age > window {
+        return Err(AppError::Validation(
+            "SNS message Timestamp is outside the accepted replay window".into(),
+        ));
+    }
+    // Tolerate a small amount of clock skew into the future.
+    if age < -window {
+        return Err(AppError::Validation(
+            "SNS message Timestamp is too far in the future".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The accepted replay window, configurable via `SNS_TIMESTAMP_WINDOW_SECS`
+/// (default: 1 hour).
+fn sns_timestamp_window() -> chrono::Duration {
+    let secs = std::env::var("SNS_TIMESTAMP_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(3600);
+    chrono::Duration::seconds(secs)
+}
+
+// ---------------------------------------------------------------------------
+// RSA signature verification
+// ---------------------------------------------------------------------------
+
+/// Verify an SNS RSA PKCS#1 v1.5 signature over `string_to_sign`.
+///
+/// Supports `SignatureVersion` 1 (SHA1) and 2 (SHA256).
+fn verify_sns_rsa_signature(
+    cert_pem: &str,
+    string_to_sign: &str,
+    signature_version: &str,
+    signature_b64: &str,
+) -> Result<(), AppError> {
+    use base64::engine::general_purpose::STANDARD;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::signature::Verifier;
+    use rsa::RsaPublicKey;
+
+    let der = pem_to_der(cert_pem)
+        .ok_or_else(|| AppError::Validation("SNS signing certificate is not valid PEM".into()))?;
+
+    let public_key = RsaPublicKey::from_public_key_der(&der)
+        .map_err(|_| AppError::Validation("SNS signing certificate has no RSA public key".into()))?;
+
+    let sig_bytes = STANDARD
+        .decode(signature_b64.trim())
+        .map_err(|_| AppError::Validation("SNS Signature is not valid base64".into()))?;
+    let signature = Signature::try_from(sig_bytes.as_slice())
+        .map_err(|_| AppError::Validation("SNS Signature has an invalid length".into()))?;
+
+    let message = string_to_sign.as_bytes();
+
+    let verified = match signature_version {
+        "1" => {
+            let key = VerifyingKey::<sha1::Sha1>::new(public_key);
+            key.verify(message, &signature).is_ok()
+        }
+        "2" => {
+            let key = VerifyingKey::<sha2::Sha256>::new(public_key);
+            key.verify(message, &signature).is_ok()
+        }
+        other => {
+            return Err(AppError::Validation(format!(
+                "unsupported SNS SignatureVersion '{other}'"
+            )));
+        }
+    };
+
+    if !verified {
+        return Err(AppError::Validation("SNS message signature verification failed".into()));
+    }
+    Ok(())
+}
+
+/// Extract the DER bytes from a PEM document (first `CERTIFICATE` block).
+fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
+    use base64::engine::general_purpose::STANDARD;
+    let begin = "-----BEGIN CERTIFICATE-----";
+    let end = "-----END CERTIFICATE-----";
+    let start = pem.find(begin)? + begin.len();
+    let stop = pem[start..].find(end)? + start;
+    let b64: String = pem[start..stop]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    STANDARD.decode(b64).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Signing-certificate cache
+// ---------------------------------------------------------------------------
+
+/// Process-wide cache of SNS signing certificates, keyed by URL.
+fn sns_cert_cache() -> &'static SnsCertCache {
+    static CACHE: std::sync::OnceLock<SnsCertCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(SnsCertCache::new)
+}
+
+/// A small TTL cache of fetched SNS signing certificates.
+struct SnsCertCache {
+    entries: dashmap::DashMap<String, (String, std::time::Instant)>,
+}
+
+impl SnsCertCache {
+    fn new() -> Self {
+        Self { entries: dashmap::DashMap::new() }
+    }
+
+    /// Return the cached certificate for `url`, fetching it if absent or stale.
+    fn get_or_fetch(&self, url: &str) -> Result<String, AppError> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+        if let Some(entry) = self.entries.get(url) {
+            if entry.1.elapsed() < TTL {
+                return Ok(entry.0.clone());
+            }
+        }
+
+        let pem = fetch_sns_cert(url)?;
+        self.entries
+            .insert(url.to_string(), (pem.clone(), std::time::Instant::now()));
+        Ok(pem)
+    }
+}
+
+/// Fetch an SNS signing certificate through the SSRF-safe outbound client.
+///
+/// The URL has already been validated by [`validate_sns_cert_url`]; the
+/// outbound client additionally disables redirects and enforces a timeout.
+fn fetch_sns_cert(url: &str) -> Result<String, AppError> {
+    let client = crate::net::outbound::build_outbound_client(&["amazonaws.com"])
+        .map_err(|e| AppError::Internal(format!("failed to build outbound client: {e}")))?;
+
+    let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+        AppError::Internal("SNS certificate fetch requires a Tokio runtime".into())
+    })?;
+
+    let url_owned = url.to_string();
+    let pem = runtime.block_on(async move {
+        let resp = client.get(&url_owned).send().await.map_err(|e| {
+            AppError::Validation(format!("failed to fetch SNS signing certificate: {e}"))
+        })?;
+        if !resp.status().is_success() {
+            return Err(AppError::Validation(format!(
+                "SNS signing certificate fetch returned HTTP {}",
+                resp.status()
+            )));
+        }
+        resp.text().await.map_err(|e| {
+            AppError::Validation(format!("failed to read SNS signing certificate: {e}"))
+        })
+    })?;
+
+    Ok(pem)
 }
 
 /// SendGrid event-webhook ECDSA-P256 signature verification.
@@ -998,4 +1277,229 @@ mod tests {
         )
         .is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #1421: SNS signature verification
+    // -----------------------------------------------------------------------
+
+    use axum::http::HeaderMap;
+
+    fn sns_headers(msg_type: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-amz-sns-message-type", msg_type.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn sns_cert_host_allowlist_accepts_aws_hosts() {
+        assert!(is_sns_cert_host("sns.us-east-1.amazonaws.com"));
+        assert!(is_sns_cert_host("sns.eu-west-1.amazonaws.com"));
+        assert!(is_sns_cert_host("sns.cn-north-1.amazonaws.com.cn"));
+        assert!(is_sns_cert_host("SNS.US-EAST-1.AMAZONAWS.COM"));
+    }
+
+    #[test]
+    fn sns_cert_host_allowlist_rejects_malicious_hosts() {
+        assert!(!is_sns_cert_host("evil.com"));
+        assert!(!is_sns_cert_host("sns.us-east-1.amazonaws.com.evil.com"));
+        assert!(!is_sns_cert_host("sns..amazonaws.com"));
+        assert!(!is_sns_cert_host("sns.us_east_1.amazonaws.com"));
+        assert!(!is_sns_cert_host("amazonaws.com"));
+        assert!(!is_sns_cert_host("sns.us-east-1.amazonaws.com.cn.evil"));
+        assert!(!is_sns_cert_host("169.254.169.254"));
+    }
+
+    #[test]
+    fn sns_cert_url_validation_rejects_http_and_bad_paths() {
+        // Non-HTTPS.
+        assert!(validate_sns_cert_url("http://sns.us-east-1.amazonaws.com/cert.pem").is_err());
+        // Wrong host.
+        assert!(validate_sns_cert_url("https://evil.com/cert.pem").is_err());
+        // Wrong path suffix.
+        assert!(validate_sns_cert_url("https://sns.us-east-1.amazonaws.com/cert.txt").is_err());
+        // Valid.
+        assert!(
+            validate_sns_cert_url("https://sns.us-east-1.amazonaws.com/SimpleNotificationService.pem")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn sns_timestamp_window_rejects_stale_and_future() {
+        let stale = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        assert!(check_sns_timestamp(&stale).is_err());
+
+        let future = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        assert!(check_sns_timestamp(&future).is_err());
+
+        let fresh = chrono::Utc::now().to_rfc3339();
+        assert!(check_sns_timestamp(&fresh).is_ok());
+
+        assert!(check_sns_timestamp("not-a-timestamp").is_err());
+    }
+
+    #[test]
+    fn sns_string_to_sign_notification_layout() {
+        let env = SnsEnvelope {
+            type_: "Notification".into(),
+            message_id: "mid".into(),
+            topic_arn: "arn:aws:sns:us-east-1:1:topic".into(),
+            timestamp: "2026-01-01T00:00:00.000Z".into(),
+            signature_version: "2".into(),
+            signature: "sig".into(),
+            signing_cert_url: "https://sns.us-east-1.amazonaws.com/c.pem".into(),
+            subject: Some("subj".into()),
+            message: Some("msg".into()),
+            token: None,
+            subscribe_url: None,
+        };
+        let s = env.string_to_sign().unwrap();
+        assert_eq!(
+            s,
+            "Message\nmsg\nMessageId\nmid\nSubject\nsubj\nTimestamp\n2026-01-01T00:00:00.000Z\nTopicArn\narn:aws:sns:us-east-1:1:topic\nType\nNotification\n"
+        );
+    }
+
+    #[test]
+    fn sns_string_to_sign_subscription_layout() {
+        let env = SnsEnvelope {
+            type_: "SubscriptionConfirmation".into(),
+            message_id: "mid".into(),
+            topic_arn: "arn:aws:sns:us-east-1:1:topic".into(),
+            timestamp: "2026-01-01T00:00:00.000Z".into(),
+            signature_version: "1".into(),
+            signature: "sig".into(),
+            signing_cert_url: "https://sns.us-east-1.amazonaws.com/c.pem".into(),
+            subject: None,
+            message: Some("msg".into()),
+            token: Some("tok".into()),
+            subscribe_url: Some("https://sns.us-east-1.amazonaws.com/?Action=Confirm".into()),
+        };
+        let s = env.string_to_sign().unwrap();
+        assert_eq!(
+            s,
+            "Message\nmsg\nMessageId\nmid\nSubscribeURL\nhttps://sns.us-east-1.amazonaws.com/?Action=Confirm\nTimestamp\n2026-01-01T00:00:00.000Z\nToken\ntok\nTopicArn\narn:aws:sns:us-east-1:1:topic\nType\nSubscriptionConfirmation\n"
+        );
+    }
+
+    #[test]
+    fn sns_missing_header_rejected() {
+        let headers = HeaderMap::new();
+        assert!(verify_sns_signature(&headers, b"{}").is_err());
+    }
+
+    #[test]
+    fn sns_header_body_type_mismatch_rejected() {
+        let body = serde_json::json!({
+            "Type": "Notification",
+            "MessageId": "mid",
+            "TopicArn": "arn:aws:sns:us-east-1:1:topic",
+            "Timestamp": chrono::Utc::now().to_rfc3339(),
+            "SignatureVersion": "2",
+            "Signature": "AAAA",
+            "SigningCertURL": "https://sns.us-east-1.amazonaws.com/c.pem",
+            "Message": "m",
+        });
+        let headers = sns_headers("SubscriptionConfirmation");
+        assert!(verify_sns_signature(&headers, body.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn sns_malicious_cert_url_rejected_before_fetch() {
+        let body = serde_json::json!({
+            "Type": "Notification",
+            "MessageId": "mid",
+            "TopicArn": "arn:aws:sns:us-east-1:1:topic",
+            "Timestamp": chrono::Utc::now().to_rfc3339(),
+            "SignatureVersion": "2",
+            "Signature": "AAAA",
+            "SigningCertURL": "https://169.254.169.254/latest/meta-data/cert.pem",
+            "Message": "m",
+        });
+        let headers = sns_headers("Notification");
+        assert!(verify_sns_signature(&headers, body.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn sns_stale_message_rejected_before_fetch() {
+        let body = serde_json::json!({
+            "Type": "Notification",
+            "MessageId": "mid",
+            "TopicArn": "arn:aws:sns:us-east-1:1:topic",
+            "Timestamp": (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339(),
+            "SignatureVersion": "2",
+            "Signature": "AAAA",
+            "SigningCertURL": "https://sns.us-east-1.amazonaws.com/c.pem",
+            "Message": "m",
+        });
+        let headers = sns_headers("Notification");
+        assert!(verify_sns_signature(&headers, body.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn sns_rsa_signature_round_trip_v2() {
+        use base64::engine::general_purpose::STANDARD;
+        use rsa::pkcs1v15::SigningKey;
+        use rsa::pkcs8::EncodePublicKey;
+        use rsa::signature::{SignatureEncoding, Signer};
+        use rsa::RsaPrivateKey;
+
+        let mut rng = rand::thread_rng();
+        let private = RsaPrivateKey::new(&mut rng, 2048).expect("keygen");
+        let public_der = private
+            .to_public_key()
+            .to_public_key_der()
+            .expect("public der");
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            STANDARD.encode(public_der.as_bytes())
+        );
+
+        let msg = "Message\nhello\nMessageId\nmid\nTimestamp\n2026-01-01T00:00:00.000Z\nTopicArn\narn\nType\nNotification\n";
+        let key = SigningKey::<sha2::Sha256>::new(private);
+        let sig = key.sign(msg.as_bytes());
+        let sig_b64 = STANDARD.encode(sig.to_bytes());
+
+        assert!(verify_sns_rsa_signature(&pem, msg, "2", &sig_b64).is_ok());
+        // Tampered message must fail.
+        assert!(verify_sns_rsa_signature(&pem, "Message\ntampered\n", "2", &sig_b64).is_err());
+        // Wrong signature version must fail.
+        assert!(verify_sns_rsa_signature(&pem, msg, "1", &sig_b64).is_err());
+        // Unsupported version.
+        assert!(verify_sns_rsa_signature(&pem, msg, "3", &sig_b64).is_err());
+    }
+
+    #[test]
+    fn sns_rsa_signature_round_trip_v1_sha1() {
+        use base64::engine::general_purpose::STANDARD;
+        use rsa::pkcs1v15::SigningKey;
+        use rsa::pkcs8::EncodePublicKey;
+        use rsa::signature::{SignatureEncoding, Signer};
+        use rsa::RsaPrivateKey;
+
+        let mut rng = rand::thread_rng();
+        let private = RsaPrivateKey::new(&mut rng, 2048).expect("keygen");
+        let public_der = private
+            .to_public_key()
+            .to_public_key_der()
+            .expect("public der");
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            STANDARD.encode(public_der.as_bytes())
+        );
+
+        let msg = "Message\nhello\nMessageId\nmid\nTimestamp\nt\nTopicArn\narn\nType\nNotification\n";
+        let key = SigningKey::<sha1::Sha1>::new(private);
+        let sig = key.sign(msg.as_bytes());
+        let sig_b64 = STANDARD.encode(sig.to_bytes());
+
+        assert!(verify_sns_rsa_signature(&pem, msg, "1", &sig_b64).is_ok());
+        assert!(verify_sns_rsa_signature(&pem, "Message\nother\n", "1", &sig_b64).is_err());
+    }
+
+    #[test]
+    fn sns_invalid_pem_rejected() {
+        assert!(verify_sns_rsa_signature("not a pem", "msg", "2", "AAAA").is_err());
+    }
+
 }

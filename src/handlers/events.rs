@@ -15,16 +15,20 @@ pub(super) fn compact_event_data(value: &Value) -> Result<Value, AppError> {
     use flate2::{write::GzEncoder, Compression};
     use std::io::Write;
 
-    let json_bytes = serde_json::to_vec(value)
-        .map_err(|e| AppError::Internal(format!("serialization error: {e}")))?;
+    let json_bytes = serde_json::to_vec(value).map_err(|e| {
+        tracing::error!(error = %e, "compact_event_data: serialization error");
+        AppError::Internal("failed to serialize event data".to_string())
+    })?;
 
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(&json_bytes)
-        .map_err(|e| AppError::Internal(format!("gzip write error: {e}")))?;
-    let compressed = encoder
-        .finish()
-        .map_err(|e| AppError::Internal(format!("gzip finish error: {e}")))?;
+    encoder.write_all(&json_bytes).map_err(|e| {
+        tracing::error!(error = %e, "compact_event_data: gzip write error");
+        AppError::Internal("failed to compress event data".to_string())
+    })?;
+    let compressed = encoder.finish().map_err(|e| {
+        tracing::error!(error = %e, "compact_event_data: gzip finish error");
+        AppError::Internal("failed to compress event data".to_string())
+    })?;
 
     Ok(Value::String(STANDARD.encode(&compressed)))
 }
@@ -2501,6 +2505,7 @@ pub async fn get_recent_events(
 
     let rows = q.fetch_all(&state.pool).await?;
     let has_next = rows.len() > limit as usize;
+    // `limit` is clamped to 1..=100 above, so this slice bound is always valid.
     let rows = if has_next {
         &rows[..limit as usize]
     } else {
@@ -2524,10 +2529,11 @@ pub async fn get_recent_events(
         "limit": limit,
     });
 
-    if has_next && !rows.is_empty() {
-        let last_event = &rows[rows.len() - 1];
-        let next_cursor = encode_cursor(last_event.ledger, last_event.id);
-        response["next_cursor"] = json!(next_cursor);
+    if has_next {
+        if let Some(last_event) = rows.last() {
+            let next_cursor = encode_cursor(last_event.ledger, last_event.id);
+            response["next_cursor"] = json!(next_cursor);
+        }
     }
 
     Ok(Json(response))
@@ -2901,6 +2907,10 @@ pub async fn bulk_insert_events(
     let mut skipped = 0i64;
     let mut failed = 0i64;
     let mut errors = Vec::new();
+    // Rows that failed for server-side reasons. Raw database error text is
+    // never returned to the client (issue #1435); it is logged server-side
+    // only and surfaced as a generic message.
+    let mut internal_failures = 0i64;
     
     for event in body.events {
         // Validate contract_id
@@ -2956,9 +2966,21 @@ pub async fn bulk_insert_events(
             }
             Err(e) => {
                 failed += 1;
-                errors.push(format!("Database error: {}", e));
+                internal_failures += 1;
+                tracing::error!(error = %e, "bulk_insert_events: database error while inserting event");
+                errors.push(
+                    "Database error while inserting event (see server logs)".to_string(),
+                );
             }
         }
+    }
+
+    if internal_failures > 0 && inserted == 0 && skipped == 0 {
+        // Every row failed for a server-side reason: this is not a client
+        // error, so report it as an internal failure without leaking details.
+        return Err(AppError::Internal(
+            "bulk insert failed due to internal database errors".to_string(),
+        ));
     }
     
     Ok(Json(crate::models::BulkInsertResponse {
@@ -3189,7 +3211,7 @@ pub async fn delete_contract_events(
     State(state): State<AppState>,
     Path(contract_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    headers: axum::http::HeaderMap,
+    client_ip: crate::middleware::client_ip::ClientIp,
 ) -> Result<Json<Value>, AppError> {
     validate_contract_id(&contract_id)?;
 
@@ -3198,10 +3220,10 @@ pub async fn delete_contract_events(
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
 
-    let client_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("unknown");
+    // Verified client IP: X-Forwarded-For is only honoured when the TCP peer is a
+    // configured trusted proxy, and the right-most untrusted hop is used. Never
+    // trust the raw header here, otherwise audit records can be falsified.
+    let client_ip = client_ip.as_str();
 
     if anonymize_only {
         // Anonymize: set anonymized=true and hash tx_hash
@@ -4587,10 +4609,12 @@ pub async fn get_event_correlations(
     let contract_ids: Vec<String> = series.keys().cloned().collect();
     let mut vectors: HashMap<String, Vec<f64>> = HashMap::new();
     for cid in &contract_ids {
-        let bucket_map: HashMap<String, f64> = series[cid]
-            .iter()
-            .cloned()
-            .collect();
+        // `contract_ids` is derived from `series.keys()`, so the lookup always
+        // succeeds; skip defensively rather than panicking if that changes.
+        let Some(entries) = series.get(cid) else {
+            continue;
+        };
+        let bucket_map: HashMap<String, f64> = entries.iter().cloned().collect();
         let vec: Vec<f64> = all_buckets
             .iter()
             .map(|b| *bucket_map.get(b).unwrap_or(&0.0))
@@ -4615,8 +4639,9 @@ pub async fn get_event_correlations(
     let mut pairs: Vec<Value> = Vec::new();
     for i in 0..contract_ids.len() {
         for j in (i + 1)..contract_ids.len() {
-            let cid_a = &contract_ids[i];
-            let cid_b = &contract_ids[j];
+            let (Some(cid_a), Some(cid_b)) = (contract_ids.get(i), contract_ids.get(j)) else {
+                continue;
+            };
             let va = vectors.get(cid_a).map(Vec::as_slice).unwrap_or(&[]);
             let vb = vectors.get(cid_b).map(Vec::as_slice).unwrap_or(&[]);
             let r = pearson(va, vb);
@@ -4768,7 +4793,10 @@ pub async fn start_event_export(
     Json(request): Json<crate::bulk_export::ExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let job_id = state.bulk_export_manager.start_export(&state.pool, request).await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "start_event_export: failed to start export job");
+            AppError::Internal("failed to start export job".to_string())
+        })?;
 
     Ok(Json(json!({
         "job_id": job_id,
