@@ -31,9 +31,12 @@ sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "u
 
 # Cryptography - Classical
 sha2 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
 subtle = "2.6"
 aes-gcm = "0.10"
+# Issue #1421: RSA PKCS#1 v1.5 verification of AWS SNS message signatures.
+rsa = { version = "0.9", features = ["sha1", "sha2"] }
 
 # Cryptography - Post-Quantum (optional feature)
 pqcrypto-dilithium = { version = "0.5", optional = true }
