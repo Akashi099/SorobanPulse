@@ -21,6 +21,8 @@ updates:
   # Keep GitHub Actions pinned SHAs current.
   # Dependabot will open PRs to update the SHA comment and the pinned hash
   # whenever an action cuts a new release, so pins never go stale.
+  # Grouping is intentionally left ungrouped so each action SHA bump lands in
+  # its own PR, making review of the pinned hash straightforward.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
