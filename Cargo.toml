@@ -257,6 +257,13 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 # Used sparingly in test modules only.
 wildcard_imports = "allow"
+# Issue #1434: a panic in a request handler or background task can abort a
+# request, poison a mutex or silently kill a long-running task. These start as
+# `warn` so the existing call sites can be converted module by module; raise
+# them to `deny` once the non-test count reaches zero. Test modules are exempt
+# via `allow-unwrap-in-tests` / `allow-expect-in-tests` in `.clippy.toml`.
+unwrap_used = "warn"
+expect_used = "warn"
 
 [profile.release]
 opt-level = 3

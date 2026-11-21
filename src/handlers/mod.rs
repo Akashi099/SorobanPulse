@@ -29,6 +29,40 @@ pub async fn get_export_job_status(Path(job_id): Path<String>) -> impl IntoRespo
     Json(json!({"job_id": job_id, "status": status, "progress": 42}))
 }
 
+/// `GET /v1/rate-limit/status` — report the caller's current rate-limit budget.
+///
+/// Issue #1434: this handler previously used `unwrap()` on the tenant header
+/// and on the limiter lookup; both are now handled without panicking.
+pub async fn get_rate_limit_status(
+    State(state): State<AppState>,
+    tenant: Option<TenantId>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let ip = client_ip_from_headers(&headers);
+    let tenant_id = tenant.map(|t| t.0);
+
+    let remaining = match state.subscription_rate_limiter.check(&ip) {
+        Ok(()) => SUBSCRIPTION_RATE_LIMIT_PER_MINUTE.saturating_sub(1),
+        Err(retry_after) => {
+            return Ok(Json(json!({
+                "client_ip": ip,
+                "tenant_id": tenant_id,
+                "limited": true,
+                "retry_after_secs": retry_after,
+                "remaining": 0,
+            })));
+        }
+    };
+
+    Ok(Json(json!({
+        "client_ip": ip,
+        "tenant_id": tenant_id,
+        "limited": false,
+        "limit": SUBSCRIPTION_RATE_LIMIT_PER_MINUTE,
+        "remaining": remaining,
+    })))
+}
+
 /// Download completed export (stub)
 pub async fn download_export_job(Path(job_id): Path<String>) -> impl IntoResponse {
     // Just return a dummy file
@@ -174,8 +208,10 @@ fn validate_jsonpath_expr(expr: &str) -> Result<(), AppError> {
         ));
     }
 
+    // The pattern is a compile-time constant; a failure here is a programming
+    // error, not input-dependent, so a documented panic is acceptable.
     let path_re = Regex::new(r"^\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\['[A-Za-z0-9_]+\'])*$")
-        .map_err(|e| AppError::Internal(format!("invalid JSONPath validator regex: {e}")))?;
+        .expect("JSONPath validator regex is a valid compile-time constant");
     if !path_re.is_match(expr) {
         return Err(AppError::Validation(
             "data_pattern must be a simple JSONPath expression like $.amount".to_string(),
@@ -219,7 +255,10 @@ async fn compress_gzip(input: &[u8]) -> Result<Vec<u8>, AppError> {
     async_compression::tokio::bufread::GzipEncoder::new(input)
         .read_to_end(&mut buf)
         .await
-        .map_err(|e| AppError::Internal(format!("gzip error: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "gzip compression failed");
+            AppError::Internal("internal server error".to_string())
+        })?;
     Ok(buf)
 }
 
@@ -230,7 +269,10 @@ async fn compress_brotli(input: &[u8]) -> Result<Vec<u8>, AppError> {
     async_compression::tokio::bufread::BrotliEncoder::new(input)
         .read_to_end(&mut buf)
         .await
-        .map_err(|e| AppError::Internal(format!("brotli error: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "brotli compression failed");
+            AppError::Internal("internal server error".to_string())
+        })?;
     Ok(buf)
 }
 
@@ -293,6 +335,7 @@ impl SubscriptionRateLimiter {
         let mut entry = self.hits.entry(ip.to_string()).or_default();
         entry.retain(|t| now.duration_since(*t) < self.window);
         if entry.len() >= self.limit {
+            // `entry.len() >= self.limit` and `limit >= 1` guarantee a first element.
             let oldest = entry.first().copied().unwrap_or(now);
             let elapsed = now.duration_since(oldest);
             let retry_after = self.window.saturating_sub(elapsed).as_secs().max(1);
@@ -3087,6 +3130,46 @@ mod tests {
         assert_eq!(v["tx_hash"], json!(tx_hash));
     }
 
+    /// Issue #1434: a panicking handler must be converted to a 500 by
+    /// `CatchPanicLayer` without taking down the server.
+    #[tokio::test]
+    async fn panicking_handler_returns_500_without_killing_server() {
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route(
+                "/boom",
+                get(|| async { panic!("intentional panic for test") }),
+            )
+            .route("/ok", get(|| async { "ok" }))
+            .layer(tower_http::catch_panic::CatchPanicLayer::new());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/boom")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // The server is still alive and serving other routes.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ok")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn database_error_response_does_not_leak_internals(pool: PgPool) {
         let app = create_test_router(pool);
@@ -3113,6 +3196,45 @@ mod tests {
         assert!(!body_str.contains("events"));
         assert!(!body_str.contains("table"));
         assert!(!body_str.contains("column"));
+    }
+
+    /// Issue #1435: internal errors must carry a generic `detail` and a
+    /// `request_id`/`correlation_id`, never raw database error text.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn internal_error_returns_generic_detail_and_request_id(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?limit=invalid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status().is_server_error());
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+
+        let detail = v
+            .get("detail")
+            .or_else(|| v.get("error"))
+            .and_then(|d| d.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(detail.contains("internal server error"));
+        assert!(!detail.contains("sqlx"));
+        assert!(!detail.contains("postgres"));
+        assert!(!detail.contains("relation"));
+        assert!(!detail.contains("column"));
+
+        let request_id = v
+            .get("request_id")
+            .or_else(|| v.get("correlation_id"))
+            .and_then(|d| d.as_str());
+        assert!(request_id.is_some(), "response must include a request id");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -11165,7 +11287,10 @@ pub async fn get_export_job_status(
     Path(job_id): Path<String>,
 ) -> Result<Json<crate::bulk_export::ExportJob>, AppError> {
     let job = state.bulk_export_manager.get_job_status(&job_id).await
-        .map_err(|e| AppError::NotFound(e))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, job_id = %job_id, "failed to get export job status");
+            AppError::NotFound("export job not found".to_string())
+        })?;
 
     Ok(Json(job))
 }
@@ -11186,7 +11311,10 @@ pub async fn download_export_file(
     Path(job_id): Path<String>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let job = state.bulk_export_manager.get_job_status(&job_id).await
-        .map_err(|e| AppError::NotFound(e))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, job_id = %job_id, "failed to get export job status");
+            AppError::NotFound("export job not found".to_string())
+        })?;
 
     if job.status != crate::bulk_export::ExportStatus::Completed {
         return Err(AppError::BadRequest(
@@ -11202,8 +11330,12 @@ pub async fn download_export_file(
         return Err(AppError::NotFound("Export file not found".to_string()));
     }
 
+    // Issue #1435: log the underlying I/O error server-side, return a generic message.
     let file = tokio::fs::File::open(file_path).await
-        .map_err(|e| AppError::Internal(format!("Failed to open export file: {}", e)))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, job_id = %job_id, "failed to open export file");
+            AppError::Internal("internal server error".to_string())
+        })?;
 
     let stream = tokio::io::BufReader::new(file);
     let body = axum::body::Body::from_stream(
@@ -11225,8 +11357,12 @@ pub async fn download_export_file(
 pub async fn cleanup_export_files(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Issue #1435: log the underlying error server-side, return a generic message.
     let removed = state.bulk_export_manager.cleanup_expired().await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to clean up expired export files");
+            AppError::Internal("internal server error".to_string())
+        })?;
 
     Ok(Json(json!({
         "status": "cleaned",
@@ -11444,9 +11580,13 @@ pub async fn get_feature_flag_status(
         region: params.get("region").cloned(),
     };
 
+    // Issue #1435: never surface raw sqlx/Postgres error text to clients.
     let enabled = crate::feature_flags::is_feature_enabled(&state.pool, &flag_name, &context)
         .await
-        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, flag_name = %flag_name, "feature flag lookup failed");
+            AppError::Internal("internal server error".to_string())
+        })?;
 
     Ok(Json(json!({
         "flag_name": flag_name,
