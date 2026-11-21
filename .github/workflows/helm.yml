@@ -7,11 +7,15 @@ on:
     paths:
       - "helm/**"
       - "ct.yaml"
+      - "Dockerfile"
+      - "migrations/**"
       - ".github/workflows/helm.yml"
   pull_request:
     paths:
       - "helm/**"
       - "ct.yaml"
+      - "Dockerfile"
+      - "migrations/**"
       - ".github/workflows/helm.yml"
 
 permissions:
@@ -43,31 +47,35 @@ jobs:
       - name: ct lint
         run: ct lint --config ct.yaml --charts helm/soroban-pulse
 
-  release:
-    name: Release chart
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: lint
+  install:
+    name: ct install (kind, real image)
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    needs: lint
     steps:
-      - uses: actions/checkout@11d5960a3c1a3c4c4c4c4c4c4c4c4c4c4c4c4c4c # v4.2.2
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-
-      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+      - uses: azure/setup-helm@v4
         with:
           version: v3.16.4
 
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
-        env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - uses: actions/setup-python@v5
         with:
-          charts_dir: helm
-          skip_existing: true
+          python-version: "3.12"
+
+      - uses: helm/chart-testing-action@v2.7.0
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: chart-testing
+
+      # Pull the real published image (chart defaults / appVersion) so the
+      # install test verifies the registry image actually deploys.
+      - name: ct install
+        run: |
+          ct install \
+            --config ct.yaml \
+            --charts helm/soroban-pulse \
+            --helm-extra-set-args "--set=image.pullPolicy=Always"
