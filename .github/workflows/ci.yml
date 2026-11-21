@@ -147,6 +147,26 @@ jobs:
       - name: Run migration round-trip
         run: bash scripts/migration-roundtrip.sh migrations
 
+  migration-safety:
+    name: Migration Safety (squawk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install squawk
+        run: npm install -g squawk-cli
+      - name: Lint new or changed up migrations
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          files=$(git diff --name-only --diff-filter=AM "$BASE_SHA" HEAD -- 'migrations/*.sql' | grep -v '\.down\.sql$' || true)
+          if [ -z "$files" ]; then
+            echo "No new or changed up migrations to lint."
+            exit 0
+          fi
+          squawk $files
+
   validate-sdk:
     name: Validate SDKs
     runs-on: ubuntu-latest

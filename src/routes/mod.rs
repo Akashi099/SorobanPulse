@@ -1,3 +1,19 @@
+//! HTTP router assembly.
+//!
+//! Route registrations live in per-domain modules (Issue #1242):
+//!
+//! | Module          | Routes                                                         |
+//! |-----------------|----------------------------------------------------------------|
+//! | `events`        | Events, contracts, tokens/accounts, ledgers, analytics, export |
+//! | `subscriptions` | Subscriptions, their integrations and anomaly alerting         |
+//! | `webhooks`      | Notification channels, email tracking/bounces, suppression     |
+//! | `admin`         | `/admin/*` and runtime configuration                           |
+//! | `deprecated`    | Unversioned aliases of `/v1` routes                            |
+//! | `openapi`       | The OpenAPI document (`ApiDoc`)                                |
+//!
+//! This module owns application state and applies all cross-cutting
+//! middleware (auth, rate limiting, tracing, CORS, compression) in one place.
+
 use axum::extract::MatchedPath;
 use axum::http::{HeaderValue, Method, Request};
 use axum::{body::Body, routing::{get, post}, Router};
@@ -40,34 +56,6 @@ impl KeyExtractor for ApiKeyExtractor {
     }
 }
 
-pub async fn get_events_with_params(
-    State(state): State<AppState>,
-    Query(params): Query<crate::models::PaginationParams>,
-) -> Result<Json<crate::models::Paginated<Event>>, AppError> {
-    let response = handlers::get_events(
-        State(state),
-        Query(params),
-        axum::http::HeaderMap::new(),
-        axum::http::Extensions::new(),
-    )
-    .await?;
-
-    let payload = response.into_body();
-    let bytes = axum::body::to_bytes(payload, usize::MAX)
-        .await
-        .map_err(|e| crate::error::AppError::Internal(format!("failed to decode events response: {}", e)))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| crate::error::AppError::Internal(format!("failed to parse events response: {}", e)))?;
-    let records: Vec<Event> = serde_json::from_value(value["events"].clone())
-        .map_err(|e| crate::error::AppError::Internal(format!("failed to decode event records: {}", e)))?;
-    Ok(Json(crate::models::Paginated {
-        data: records,
-        page: value["page"].as_i64().unwrap_or(1),
-        limit: value["limit"].as_i64().unwrap_or(20),
-        total: value["total"].as_i64().unwrap_or(0),
-        has_more: value["has_more"].as_bool().unwrap_or(false),
-    }))
-}
 use tower_http::{
     cors::CorsLayer,
     limit::RequestBodyLimitLayer,
@@ -81,7 +69,7 @@ use crate::{
     aggregation, config::{Config, HealthState, IndexerState},
     handlers, metrics, middleware,
     models::SorobanEvent,
-    saved_queries, subscriptions,
+    saved_queries,
 };
 
 type ContractCountCache = moka::future::Cache<String, i64>;
@@ -149,171 +137,15 @@ pub struct AppState {
     pub serialization_cache: std::sync::Arc<crate::serialization_cache::SerializedEventCache>,
 }
 
-/// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
-#[derive(OpenApi)]
-#[openapi(
-    info(
-        title = "Soroban Pulse API",
-        version = "1.0.0",
-        description = "## Soroban Pulse API
+mod admin;
+mod deprecated;
+mod events;
+mod openapi;
+mod subscriptions;
+mod webhooks;
 
-Real-time indexing and querying of Soroban smart contract events on the Stellar network.
-
----
-
-### Authentication
-
-Most endpoints are open. When the `API_KEY` environment variable is set, all routes except
-`/health` and `/healthz/*` require one of:
-
-- `Authorization: Bearer <API_KEY>` header
-- `X-Api-Key: <API_KEY>` header
-
-Administrative endpoints under `/v1/admin/*` require `ADMIN_API_KEY` (independent of `API_KEY`).
-A missing key returns **401 Unauthorized**; a wrong key returns **403 Forbidden**.
-
----
-
-### Rate Limiting
-
-Default: **60 requests / minute per IP** (configurable via `RATE_LIMIT_PER_MINUTE`).
-Requests that exceed the limit receive **429 Too Many Requests** with a `Retry-After` header.
-Set `RATE_LIMIT_PER_MINUTE=0` to disable rate limiting entirely.
-
----
-
-### Guides & Resources
-
-- [Developer Onboarding](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/onboarding.md)
-- [API Usage Guide](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/api-guide.md)
-- [SDK Integration Guide](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sdk-integration-guide.md)
-- [Webhook Verification](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/webhook-verification.md)
-- [Contract Event Schemas](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/contract-event-schemas.md)"
-    ),
-    paths(
-        crate::job_scheduler::list_jobs,
-        crate::account_events::get_account_events,
-        crate::sep41::get_sep41_events,
-        handlers::health,
-        crate::meta::get_meta,
-        crate::contract_resource_stats::get_contract_resource_stats,
-        crate::api_keys::create_api_key,
-        crate::api_keys::list_api_keys,
-        crate::api_keys::revoke_api_key,
-        handlers::health_live,
-        handlers::health_ready,
-        handlers::health_postgres,
-        handlers::health_rpc,
-        handlers::health_external,
-        handlers::email_bounce_webhook,
-        handlers::get_cross_chain_trace,
-        handlers::analyze_causality,
-        handlers::get_feature_flag_status,
-        handlers::status,
-        handlers::get_events,
-        handlers::get_events_feed,
-        handlers::get_event_stats,
-        handlers::get_contract_stats_history,
-        handlers::get_events_diff,
-        handlers::export_events,
-        handlers::get_recent_events,
-        handlers::get_events_by_contract,
-        handlers::get_events_by_tx,
-        handlers::get_related_events_by_tx,
-        handlers::get_events_by_ledger_hash,
-        handlers::get_events_by_tx_batch,
-        handlers::stream_events,
-        handlers::stream_events_by_contract,
-        handlers::stream_events_multi,
-        handlers::ws_events,
-        handlers::ws_stream_events,
-        handlers::get_contracts,
-        handlers::replay_events,
-        handlers::replay_with_transform,
-        handlers::start_reencrypt,
-        handlers::register_contract_abi,
-        handlers::get_contract_abi,
-        handlers::upsert_contract_metadata,
-        handlers::get_contract_metadata,
-        crate::contract_tracker::get_contract,
-        crate::contract_specs::get_contract_spec,
-        handlers::anonymize_event,
-        handlers::pause_indexer,
-        handlers::resume_indexer,
-        handlers::list_archive,
-        handlers::query_archive,
-        handlers::restore_from_archive,
-        handlers::batch_query_events,
-        handlers::fulltext_search,
-        handlers::events_aggregations,
-        handlers::register_contract_schema,
-        handlers::get_contract_schema,
-        handlers::delete_contract_schema,
-        handlers::validate_event_data_against_schema,
-        handlers::list_contract_schemas,
-        handlers::start_mask_events,
-        handlers::get_mask_job_status,
-        handlers::get_timeseries,
-        handlers::get_contract_event_counts,
-        handlers::get_contract_summary,
-        handlers::get_contracts_search,
-        handlers::check_contract_exists,
-        handlers::get_config,
-        handlers::reload_config,
-        handlers::get_anonymization_config,
-        handlers::upsert_anonymization_rule,
-        handlers::delete_anonymization_rule,
-        handlers::scan_event_for_pii,
-        handlers::get_index_fragmentation,
-        handlers::reindex_index,
-    ),
-    components(schemas(
-        crate::models::Event,
-        crate::contract_metadata::ContractMetadata,
-        crate::contract_metadata::UpsertContractMetadata,
-        crate::models::EventType,
-        crate::models::SortOrder,
-        crate::models::PaginationParams,
-        crate::models::ContractSummary,
-        crate::contract_tracker::TrackedContract,
-        crate::models::ContractDetailSummary,
-        crate::models::LedgerRange,
-        crate::models::EventTypeBreakdown,
-        crate::models::ContractSearchResult,
-        crate::models::ContractSearchParams,
-        crate::models::ContractExistsResponse,
-        crate::models::ConfigResponse,
-        crate::models::ConfigReloadResponse,
-        crate::models::EventStats,
-        crate::models::ContractStatEntry,
-        crate::models::ReplayRequest,
-        crate::models::BatchTxRequest,
-        crate::models::ErrorResponse,
-        crate::models::DiffParams,
-        crate::models::ContractDiff,
-        crate::models::DiffResponse,
-        crate::models::MaskEventsRequest,
-        crate::models::MaskEventsResponse,
-        crate::models::MaskJobStatus,
-        crate::models::TimeseriesParams,
-        crate::models::TimeseriesBucket,
-        crate::models::TimeseriesResponse,
-        crate::error::ValidationErrorDetail,
-        crate::meta::MetaResponse,
-        crate::contract_resource_stats::ContractResourceStats,
-        crate::contract_resource_stats::ResourceAggregate,
-        crate::api_keys::ApiKeyScope,
-        crate::api_keys::CreateApiKeyRequest,
-        crate::api_keys::CreatedApiKey,
-        crate::api_keys::ApiKeyInfo,
-    )),
-    tags(
-        (name = "events", description = "Event indexing endpoints"),
-        (name = "system", description = "Health and observability endpoints"),
-        (name = "admin", description = "Administrative endpoints"),
-    )
-)]
-pub struct ApiDoc;
+pub use events::get_events_with_params;
+pub use openapi::ApiDoc;
 
 pub fn create_router(
     pool: PgPool,
@@ -566,72 +398,12 @@ pub fn create_router_with_tx_and_tenant_map(
     let replenish_ms = (60_000u64 / u64::from(rate_limit_per_minute.max(1))).max(1);
     let burst = rate_limit_per_minute.max(1);
 
-    // Admin routes (issue #409): gated by a dedicated admin auth layer in
-    // addition to the global auth layer. The admin layer requires an
-    // ADMIN_API_KEY even when no regular API_KEY is configured.
-    let admin_routes = Router::new()
-        .route("/admin/lua/preview", axum::routing::post(handlers::lua_preview))
-        .route("/admin/replay", axum::routing::post(handlers::replay_events))
-        .route("/admin/reencrypt", axum::routing::post(handlers::start_reencrypt))
-        .route("/admin/token-transfers/backfill", axum::routing::post(crate::token_events::backfill_token_transfers))
-        .route("/admin/event-addresses/backfill", axum::routing::post(crate::account_events::backfill_event_addresses))
-        .route("/admin/sep41/backfill", axum::routing::post(crate::sep41::backfill_sep41))
-        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi).get(handlers::get_contract_abi))
-        .route("/admin/contracts/{contract_id}/metadata", axum::routing::post(handlers::upsert_contract_metadata).delete(handlers::delete_contract_metadata))
-        .route("/admin/contracts/metadata/import", axum::routing::post(handlers::bulk_import_contract_metadata))
-        .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
-        .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
-        .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
-        .route("/admin/contracts/{contract_id}/schema", axum::routing::post(handlers::register_contract_schema).get(handlers::get_contract_schema).delete(handlers::delete_contract_schema))
-        .route("/admin/contracts/{contract_id}/validate", axum::routing::post(handlers::validate_event_data_against_schema))
-        .route("/admin/schemas", axum::routing::get(handlers::list_contract_schemas))
-        .route("/admin/pool-config", axum::routing::get(handlers::get_pool_tuning_guide))
-        .route("/admin/pool-config/statistics", axum::routing::get(handlers::get_pool_statistics))
-        .route("/admin/pool-config/health", axum::routing::get(handlers::get_pool_health))
-        // Issue #1345: pg_stat_statements slow-query digest
-        .route("/admin/slow-queries", axum::routing::get(handlers::get_slow_queries))
-        .route("/contracts/{id}/resources", axum::routing::get(handlers::get_contract_resources))
-        .route("/admin/indexer/gaps", axum::routing::get(handlers::get_indexer_gaps))
-        .route("/admin/pool-config/adaptive", axum::routing::get(handlers::get_adaptive_pool_status))
-        .route("/admin/pool-config/adaptive/config", axum::routing::put(handlers::update_adaptive_pool_config))
-        .route("/admin/pool-config/adaptive/rollback", axum::routing::post(handlers::rollback_adaptive_pool_config))
-        .route("/admin/statistics/report", axum::routing::get(handlers::get_statistics_report))
-        .route("/admin/statistics/stale", axum::routing::get(handlers::detect_stale_statistics))
-        .route("/admin/statistics/health", axum::routing::get(handlers::get_statistics_health))
-        .route("/admin/statistics/refresh", axum::routing::post(handlers::refresh_statistics))
-        .route("/admin/statistics/jobs", axum::routing::get(handlers::get_analysis_jobs))
-        // #696: SLI / SLO dashboard reporting endpoints (admin-gated)
-        .route("/admin/slo/report", axum::routing::get(handlers::get_slo_report))
-        .route("/admin/jobs", axum::routing::get(crate::job_scheduler::list_jobs))
-        .route("/admin/slo/sample", axum::routing::post(handlers::record_slo_sample))
-        // #894: Backup verification
-        .route("/admin/backup/verification/report", axum::routing::get(handlers::get_backup_verification_report))
-        .route("/admin/backup/verification/trigger", axum::routing::post(handlers::trigger_backup_verification))
-        // #897: Alert silence management
-        .route(
-            "/admin/alerts/silences",
-            axum::routing::post(handlers::create_alert_silence)
-                .get(handlers::get_alert_silences),
-        )
-        .route("/admin/alerts/silences/{silence_id}", axum::routing::delete(handlers::delete_alert_silence))
-        // #839: Push notification delivery analytics
-        .route("/admin/push/analytics", axum::routing::get(crate::push_notification::get_push_analytics))
-        // #879: Webhook circuit breaker admin endpoints
-        .route("/admin/webhook/circuit-breaker", axum::routing::get(handlers::get_circuit_breaker_stats))
-        .route("/admin/webhook/circuit-breaker/{endpoint}", axum::routing::get(handlers::get_endpoint_circuit_breaker_stats))
-        .route("/admin/webhook/circuit-breaker/{endpoint}/reset", axum::routing::post(handlers::reset_circuit_breaker))
-        // #881: Bulk event export endpoints
-        .route("/admin/events/export", axum::routing::post(handlers::start_event_export).get(handlers::list_export_jobs))
-        .route("/admin/events/export/{job_id}", axum::routing::get(handlers::get_export_job_status))
-        .route("/admin/events/export/{job_id}/download", axum::routing::get(handlers::download_export_file))
-        .route("/admin/events/export/cleanup", axum::routing::post(handlers::cleanup_export_files))
-        .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&admin_auth_state),
-            middleware::admin_auth_middleware,
-        ));
-
-    // Versioned v1 routes
+    // Versioned v1 routes, one router per domain.
     let v1 = Router::new()
+        .merge(events::routes())
+        .merge(subscriptions::routes())
+        .merge(webhooks::routes())
+        .merge(admin::routes())
         .route("/events", get(handlers::get_events))
         .route("/events/feed.rss", get(handlers::get_events_feed))
         .route("/events/stats", get(handlers::get_event_stats))
@@ -832,43 +604,9 @@ pub fn create_router_with_tx_and_tenant_map(
         .route_layer(axum::middleware::from_fn_with_state(
             push_preload_state,
             crate::push_preload::push_link_header_middleware,
-        ));
-
-
-    // Issue #1258: scoped API key management. Always requires an admin
-    // credential, even when ADMIN_API_KEY is unset.
-    let api_key_routes = Router::new()
-        .route(
-            "/admin/api-keys",
-            post(crate::api_keys::create_api_key).get(crate::api_keys::list_api_keys),
-        )
-        .route(
-            "/admin/api-keys/{id}",
-            axum::routing::delete(crate::api_keys::revoke_api_key),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&admin_auth_state),
-            middleware::require_admin_middleware,
-        ));
-    let v1 = v1.merge(api_key_routes);
-
-    // Unversioned deprecated aliases (same handlers, add Deprecation header via middleware)
-    let deprecated = Router::new()
-        .route("/events", get(handlers::get_events))
-        .route("/events/stream", get(handlers::stream_events))
-        .route(
-            "/events/contract/{contract_id}",
-            get(handlers::get_events_by_contract),
-        )
-        .route(
-            "/events/contract/{contract_id}/stream",
-            get(handlers::stream_events_by_contract),
-        )
-        .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
-        .route("/contracts", get(handlers::get_contracts))
-        .layer(axum::middleware::from_fn(
-            middleware::deprecation_middleware,
-        ));
+        ))
+        // Merged after the push-preload route_layer, so that layer does not wrap these.
+        .merge(admin::api_key_routes(admin_auth_state));
 
     // Health endpoints — exempt from rate limiting.
     // The unsubscribe endpoint is public (reached from email links) and must
@@ -886,6 +624,37 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/v1/meta", get(crate::meta::get_meta));
 
     // All other routes — subject to rate limiting.
+    let api_routes = Router::new()
+        .route("/status", get(handlers::status))
+        .route("/openapi.json", get(handlers::openapi_json))
+        .route("/docs", get(handlers::swagger_ui))
+        .merge(graphql_routes())
+        .nest("/v1", v1)
+        .merge(deprecated::routes());
+
+    // Apply the governor rate limiter keyed by `$extractor`. A macro rather
+    // than a function because each extractor yields a distinct layer type.
+    macro_rules! rate_limited {
+        ($routes:ident, $replenish_ms:expr, $burst:expr, $extractor:expr) => {
+            match GovernorConfigBuilder::default()
+                .per_millisecond($replenish_ms)
+                .burst_size($burst)
+                .key_extractor($extractor)
+                .use_headers()
+                .finish()
+            {
+                Some(conf) => $routes
+                    .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
+                    .layer(GovernorLayer::new(Arc::new(conf))),
+                // Unreachable with the clamped period/burst above; never panic at startup.
+                None => {
+                    tracing::error!("Invalid rate limiter configuration; IP rate limiting disabled");
+                    $routes
+                }
+            }
+        };
+    }
+
     let rate_limited_routes = if config.multi_tenant {
         // In multi-tenant mode rate-limit per API key so each tenant has an
         // independent quota regardless of IP (tenants may share egress IPs).
@@ -894,77 +663,11 @@ pub fn create_router_with_tx_and_tenant_map(
             .unwrap_or(rate_limit_per_minute);
         let replenish_ms_t = (60_000u64 / u64::from(effective_limit.max(1))).max(1);
         let burst_t = effective_limit.max(1);
-        let routes = Router::new()
-            .route("/status", get(handlers::status))
-            .route("/openapi.json", get(handlers::openapi_json))
-            .route("/docs", get(handlers::swagger_ui))
-            .merge(graphql_routes())
-            .nest("/v1", v1)
-            .merge(deprecated);
-        match GovernorConfigBuilder::default()
-            .per_millisecond(replenish_ms_t)
-            .burst_size(burst_t)
-            .key_extractor(ApiKeyExtractor)
-            .use_headers()
-            .finish()
-        {
-            Some(conf) => routes
-                .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
-                .layer(GovernorLayer::new(Arc::new(conf))),
-            // Unreachable with the clamped period/burst above; never panic at startup.
-            None => {
-                tracing::error!("Invalid rate limiter configuration; IP rate limiting disabled");
-                routes
-            }
-        }
+        rate_limited!(api_routes, replenish_ms_t, burst_t, ApiKeyExtractor)
     } else if behind_proxy {
-        let routes = Router::new()
-            .route("/status", get(handlers::status))
-            .route("/openapi.json", get(handlers::openapi_json))
-            .route("/docs", get(handlers::swagger_ui))
-            .merge(graphql_routes())
-            .nest("/v1", v1)
-            .merge(deprecated);
-        match GovernorConfigBuilder::default()
-            .per_millisecond(replenish_ms)
-            .burst_size(burst)
-            .key_extractor(SmartIpKeyExtractor)
-            .use_headers()
-            .finish()
-        {
-            Some(conf) => routes
-                .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
-                .layer(GovernorLayer::new(Arc::new(conf))),
-            // Unreachable with the clamped period/burst above; never panic at startup.
-            None => {
-                tracing::error!("Invalid rate limiter configuration; IP rate limiting disabled");
-                routes
-            }
-        }
+        rate_limited!(api_routes, replenish_ms, burst, SmartIpKeyExtractor)
     } else {
-        let routes = Router::new()
-            .route("/status", get(handlers::status))
-            .route("/openapi.json", get(handlers::openapi_json))
-            .route("/docs", get(handlers::swagger_ui))
-            .merge(graphql_routes())
-            .nest("/v1", v1)
-            .merge(deprecated);
-        match GovernorConfigBuilder::default()
-            .per_millisecond(replenish_ms)
-            .burst_size(burst)
-            .key_extractor(PeerIpKeyExtractor)
-            .use_headers()
-            .finish()
-        {
-            Some(conf) => routes
-                .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
-                .layer(GovernorLayer::new(Arc::new(conf))),
-            // Unreachable with the clamped period/burst above; never panic at startup.
-            None => {
-                tracing::error!("Invalid rate limiter configuration; IP rate limiting disabled");
-                routes
-            }
-        }
+        rate_limited!(api_routes, replenish_ms, burst, PeerIpKeyExtractor)
     };
 
     // Issue #1112: static dashboard at /ui — outside auth-gated rate limiting.
