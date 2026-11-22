@@ -14,5 +14,6 @@
 //!   cargo test --test security webhook_ssrf_tests
 //!   cargo test --test security outbound_ssrf_tests
 //!   cargo test --test security cors_tests
+//!   cargo test --test security admin_fail_closed_tests
 
 mod security;
